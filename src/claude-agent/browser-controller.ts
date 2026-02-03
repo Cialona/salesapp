@@ -20,12 +20,19 @@ export interface BrowserState {
   title: string;
 }
 
+export interface DownloadedFile {
+  originalUrl: string;
+  localPath: string;
+  filename: string;
+}
+
 export class BrowserController {
   private browser: Browser | null = null;
   private page: Page | null = null;
   private width: number;
   private height: number;
   private downloadDir: string;
+  private downloads: DownloadedFile[] = [];
 
   constructor(width = 1280, height = 800) {
     this.width = width;
@@ -51,12 +58,23 @@ export class BrowserController {
 
     this.page = await context.newPage();
 
-    // Handle downloads
+    // Handle downloads - track original URL and local path
     this.page.on('download', async (download) => {
       const filename = download.suggestedFilename();
       const filepath = path.join(this.downloadDir, filename);
+      const originalUrl = download.url();
+
       await download.saveAs(filepath);
-      console.log(`[DOWNLOAD] Saved: ${filepath}`);
+
+      // Store download info with original URL
+      this.downloads.push({
+        originalUrl,
+        localPath: filepath,
+        filename,
+      });
+
+      console.log(`[DOWNLOAD] Saved: ${filename}`);
+      console.log(`[DOWNLOAD] Original URL: ${originalUrl}`);
     });
   }
 
@@ -191,10 +209,14 @@ export class BrowserController {
     }
   }
 
-  // Get downloaded files
-  getDownloadedFiles(): string[] {
-    if (!fs.existsSync(this.downloadDir)) return [];
-    return fs.readdirSync(this.downloadDir).map(f => path.join(this.downloadDir, f));
+  // Get downloaded files with their original URLs
+  getDownloadedFiles(): DownloadedFile[] {
+    return this.downloads;
+  }
+
+  // Clear download tracking (for reuse)
+  clearDownloads(): void {
+    this.downloads = [];
   }
 
   // Get current page content (for PDF detection, etc.)

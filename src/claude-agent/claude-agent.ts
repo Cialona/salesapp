@@ -6,7 +6,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { BrowserController } from './browser-controller.js';
+import { BrowserController, type DownloadedFile } from './browser-controller.js';
 import type { DiscoveryOutput, TestCaseInput } from '../schemas/output.js';
 import { createEmptyOutput } from '../schemas/output.js';
 
@@ -308,18 +308,65 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
       // Record visited URLs
       output.debug.visited_urls.push(state.url);
 
-      // Record downloaded files
+      // Record downloaded files and auto-map to output fields
       const downloads = this.browser.getDownloadedFiles();
-      for (const filepath of downloads) {
+      for (const download of downloads) {
         output.debug.downloaded_files.push({
-          url: filepath,
-          path: filepath,
-          content_type: filepath.endsWith('.pdf') ? 'application/pdf' : null,
+          url: download.originalUrl,
+          path: download.localPath,
+          content_type: download.filename.endsWith('.pdf') ? 'application/pdf' : null,
           bytes: null,
         });
+
+        // Auto-map downloads to document fields based on filename
+        const filename = download.filename.toLowerCase();
+        const url = download.originalUrl;
+
+        // Floor plan / Hall plan / Geländeplan
+        if ((filename.includes('gelände') || filename.includes('gelande') ||
+            filename.includes('floor') || filename.includes('hall') ||
+            filename.includes('plan') || filename.includes('map')) &&
+            !filename.includes('richtlin') && !filename.includes('techni')) {
+          if (!output.documents.floorplan_url) {
+            output.documents.floorplan_url = url;
+            output.quality.floorplan = 'strong';
+            output.primary_reasoning.floorplan = `Auto-detected from download: ${download.filename}`;
+          }
+        }
+
+        // Technical Guidelines / Richtlinien
+        if (filename.includes('richtlin') || filename.includes('guideline') ||
+            filename.includes('techni') || filename.includes('regulation')) {
+          if (!output.documents.rules_url) {
+            output.documents.rules_url = url;
+            output.quality.rules = 'strong';
+            output.primary_reasoning.rules = `Auto-detected from download: ${download.filename}`;
+          }
+        }
+
+        // Exhibitor Manual / Service Documentation / Verkehrsleitfaden
+        if (filename.includes('manual') || filename.includes('handbook') ||
+            filename.includes('service') || filename.includes('leitfaden') ||
+            filename.includes('aussteller') || filename.includes('exhibitor')) {
+          if (!output.documents.exhibitor_manual_url) {
+            output.documents.exhibitor_manual_url = url;
+            output.quality.exhibitor_manual = 'strong';
+            output.primary_reasoning.exhibitor_manual = `Auto-detected from download: ${download.filename}`;
+          }
+        }
+
+        // Schedule / Timeline / Zeitplan
+        if (filename.includes('zeitplan') || filename.includes('timeline') ||
+            filename.includes('schedule') || filename.includes('aufbau') ||
+            filename.includes('abbau')) {
+          if (!output.documents.schedule_page_url) {
+            output.documents.schedule_page_url = url;
+          }
+        }
       }
 
       output.debug.notes.push(`Agent completed in ${iteration} iterations`);
+      output.debug.notes.push(`Auto-mapped ${downloads.length} downloaded files to output fields`);
       output.debug.notes.push(`Total time: ${Math.round((Date.now() - startTime) / 1000)}s`);
 
     } catch (error) {
