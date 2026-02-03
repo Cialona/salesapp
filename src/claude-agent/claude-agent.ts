@@ -113,8 +113,8 @@ export class ClaudeAgent {
     });
     // Smaller viewport = smaller screenshots = lower costs
     this.browser = new BrowserController(1024, 768);
-    // Max 20 iterations should be enough - keeps costs under $1
-    this.maxIterations = options.maxIterations || 20;
+    // 30 iterations: ~15 navigate, ~10 find docs, ~5 to write JSON summary
+    this.maxIterations = options.maxIterations || 30;
     this.debug = options.debug || false;
   }
 
@@ -175,6 +175,14 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
       while (!done && iteration < this.maxIterations) {
         iteration++;
         this.log(`\n--- Iteration ${iteration} ---`);
+
+        // Warn agent to wrap up when approaching limit
+        if (iteration === this.maxIterations - 5) {
+          messages.push({
+            role: 'user',
+            content: [{ type: 'text', text: '⚠️ Je hebt nog 5 acties over. Begin nu met je JSON samenvatting van wat je tot nu toe hebt gevonden. Geef de URLs die je hebt gezien.' }],
+          });
+        }
 
         // Call Claude with computer use beta
         const response = await this.client.beta.messages.create({
