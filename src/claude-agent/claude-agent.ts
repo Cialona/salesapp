@@ -43,42 +43,57 @@ Vind deze documenten voor standbouwers:
 4. Build-up/Tear-down Schedule (opbouw/afbouw tijden)
 5. Exhibitor Directory (lijst van exposanten)
 
-=== SNELLE STRATEGIE (max 15 stappen!) ===
+=== STRATEGIE ===
 
-1. Kijk naar de navigatie - zoek "Exhibitors", "For Exhibitors", "Service", "Downloads"
-2. Ga direct naar het Download Center of Downloads pagina
-3. Scan alle PDF links - noteer URLs van relevante documenten
-4. Check of er een exhibitor directory/lijst is
+1. Zoek in navigatie naar "Exhibitors", "For Exhibitors", "Service", "Downloads"
+2. Ga naar het Download Center of Downloads pagina
+3. BELANGRIJK: Om de echte PDF URL te vinden:
+   - Right-click op de PDF link
+   - Kies "Copy link address" of bekijk de href in de browser
+   - De URL ziet er vaak uit als: https://.../.../document.pdf
+4. Zoek naar exhibitor directory (vaak apart subdomein)
 5. STOP zodra je de belangrijkste documenten hebt gevonden
 
 === HERKEN DOCUMENTEN AAN ===
 - Exhibitor Manual: "manual", "handbook", "guide", "brochure", "service"
-- Floor Plan: "hall plan", "floor plan", "site map", "venue"
-- Technical Guidelines: "technical", "guidelines", "regulations", "construction"
-- Schedule: "timeline", "dates", "build-up", "set-up", "move-in"
+- Floor Plan: "hall plan", "floor plan", "site map", "venue", "geländeplan"
+- Technical Guidelines: "technical", "guidelines", "regulations", "richtlinien"
+- Schedule: "timeline", "dates", "build-up", "set-up", "zeitplan", "aufbau"
 
-=== REGELS ===
-- WEES EFFICIËNT - niet meer dan 15 acties nodig
-- Noteer volledige URLs (https://...)
-- Als Download Center gevonden, scan snel ALLE categorieën
-- Stop als je 3+ documenten hebt gevonden
+=== KRITIEKE REGELS VOOR URLs ===
 
-=== OUTPUT ===
-Geef resultaat als JSON zodra je klaar bent:
+⚠️ ALLEEN ECHTE URLs RAPPORTEREN! ⚠️
+
+FOUT: "https://example.com/downloads - Document Name (PDF, 500kb)"
+GOED:  "https://example.com/media/files/document.pdf"
+
+- Een URL begint met https:// en bevat GEEN spaties of beschrijvingen
+- Als je de URL niet kunt zien, hover over de link of right-click → copy link
+- PDF URLs eindigen vaak op .pdf
+- Typische PDF URL patronen:
+  - https://...media.../filename.pdf
+  - https://...downloads/filename.pdf
+  - https://...documents/filename.pdf
+
+=== OUTPUT FORMAT ===
+
+Geef resultaat als JSON:
 \`\`\`json
 {
-  "floorplan_url": "URL of null",
-  "exhibitor_manual_url": "URL of null",
-  "rules_url": "URL of null",
-  "exhibitor_directory_url": "URL of null",
-  "downloads_page_url": "URL of null",
+  "floorplan_url": "https://exact-url-to-file.pdf",
+  "exhibitor_manual_url": "https://exact-url-to-file.pdf",
+  "rules_url": "https://exact-url-to-file.pdf",
+  "exhibitor_directory_url": "https://exact-url-or-page",
+  "downloads_page_url": "https://url-to-download-center",
   "schedule": {
-    "build_up": [{"date": "YYYY-MM-DD", "time": "HH:MM", "description": "..."}],
-    "tear_down": [{"date": "YYYY-MM-DD", "time": "HH:MM", "description": "..."}]
+    "build_up": [{"date": "2026-01-29", "time": "07:00-22:00", "description": "Start opbouw"}],
+    "tear_down": [{"date": "2026-02-06", "time": "16:00-22:00", "description": "Start afbouw"}]
   },
-  "notes": "Kort: wat je vond en waar"
+  "notes": "Wat je vond en waar"
 }
-\`\`\``;
+\`\`\`
+
+Gebruik null als je een document niet kunt vinden.`;
 
 export interface ClaudeAgentOptions {
   apiKey?: string;

@@ -41,7 +41,7 @@ program
   .option('-r, --report <path>', 'Output markdown report path')
   .option('--json', 'Output JSON to stdout')
   .option('--debug', 'Enable debug logging')
-  .option('--max-iterations <n>', 'Maximum agent iterations (default: 50)', '50')
+  .option('--max-iterations <n>', 'Maximum agent iterations (default: 20)', '20')
   .action(async (options) => {
     if (!options.name) {
       console.error('Error: --name is required');
