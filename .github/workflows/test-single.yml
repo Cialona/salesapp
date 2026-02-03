@@ -1,0 +1,151 @@
+name: Test Single Fair
+
+on:
+  workflow_dispatch:
+    inputs:
+      fair_name:
+        description: 'Name of the trade fair'
+        required: true
+        default: 'Ambiente'
+        type: choice
+        options:
+          - Ambiente
+          - Fruit Logistica
+          - bauma
+          - Hannover Messe
+          - MEDICA
+          - ISE
+          - Anuga
+          - interzum
+          - drupa
+          - Automechanika
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Set fair URL
+        id: fair
+        run: |
+          case "${{ inputs.fair_name }}" in
+            "Ambiente")
+              echo "url=https://ambiente.messefrankfurt.com" >> $GITHUB_OUTPUT
+              ;;
+            "Fruit Logistica")
+              echo "url=https://www.fruitlogistica.com" >> $GITHUB_OUTPUT
+              ;;
+            "bauma")
+              echo "url=https://bauma.de" >> $GITHUB_OUTPUT
+              ;;
+            "Hannover Messe")
+              echo "url=https://www.hannovermesse.de" >> $GITHUB_OUTPUT
+              ;;
+            "MEDICA")
+              echo "url=https://www.medica.de" >> $GITHUB_OUTPUT
+              ;;
+            "ISE")
+              echo "url=https://www.iseurope.org" >> $GITHUB_OUTPUT
+              ;;
+            "Anuga")
+              echo "url=https://www.anuga.com" >> $GITHUB_OUTPUT
+              ;;
+            "interzum")
+              echo "url=https://www.interzum.com" >> $GITHUB_OUTPUT
+              ;;
+            "drupa")
+              echo "url=https://www.drupa.com" >> $GITHUB_OUTPUT
+              ;;
+            "Automechanika")
+              echo "url=https://automechanika.messefrankfurt.com" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Run Discovery
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "╔═══════════════════════════════════════════════════════════════╗"
+          echo "║      Testing: ${{ inputs.fair_name }}"
+          echo "║      URL: ${{ steps.fair.outputs.url }}"
+          echo "╚═══════════════════════════════════════════════════════════════╝"
+
+          SAFE_NAME=$(echo "${{ inputs.fair_name }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+
+          pnpm discover:claude \
+            --name "${{ inputs.fair_name }}" \
+            --url "${{ steps.fair.outputs.url }}" \
+            --output "outputs/${SAFE_NAME}.json" \
+            --report "reports/${SAFE_NAME}.md" \
+            --debug
+
+      - name: Display Results
+        if: always()
+        run: |
+          SAFE_NAME=$(echo "${{ inputs.fair_name }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "JSON OUTPUT:"
+          echo "═══════════════════════════════════════════════════════════════"
+          cat "outputs/${SAFE_NAME}.json" 2>/dev/null | jq . || echo "No output"
+
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "QUALITY SUMMARY:"
+          echo "═══════════════════════════════════════════════════════════════"
+
+          if [ -f "outputs/${SAFE_NAME}.json" ]; then
+            echo "| Field | Status |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+            for field in floorplan exhibitor_manual rules schedule exhibitor_directory; do
+              quality=$(jq -r ".quality.${field}" "outputs/${SAFE_NAME}.json" 2>/dev/null || echo "missing")
+              if [ "$quality" = "strong" ]; then
+                icon="✅"
+              elif [ "$quality" = "weak" ]; then
+                icon="⚠️"
+              else
+                icon="❌"
+              fi
+              # Convert field name for display
+              display_field=$(echo "$field" | tr '_' ' ' | sed 's/\b\(.\)/\u\1/g')
+              echo "| $display_field | $icon $quality |" >> $GITHUB_STEP_SUMMARY
+            done
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Found Documents" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            jq '.documents' "outputs/${SAFE_NAME}.json" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ inputs.fair_name }}
+          path: |
+            outputs/
+            reports/
+          retention-days: 30
