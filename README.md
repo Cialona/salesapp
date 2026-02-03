@@ -44,7 +44,33 @@ pnpm exec playwright install chromium
 
 ## Usage
 
-### Single Fair Discovery
+### Option 1: Claude Computer Use Agent (Recommended)
+
+This version uses Claude's Computer Use API to navigate websites like a human. It's more reliable across different websites.
+
+**Requirements:**
+- Anthropic API key (get one at https://console.anthropic.com/)
+
+```bash
+# Set your API key
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Run discovery
+pnpm discover:claude --name "Fruit Logistica" --url https://www.fruitlogistica.com
+
+# With output files
+pnpm discover:claude --name "Fruit Logistica" \
+  --url https://www.fruitlogistica.com \
+  --output outputs/fruit-logistica.json \
+  --report reports/fruit-logistica.md
+
+# With debug logging
+pnpm discover:claude --name "Fruit Logistica" --url https://www.fruitlogistica.com --debug
+```
+
+**Cost:** ~$0.05-0.20 per fair (depends on website complexity)
+
+### Option 2: Rule-based Discovery (Original)
 
 ```bash
 # Basic usage with known URL

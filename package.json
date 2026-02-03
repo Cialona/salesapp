@@ -10,6 +10,7 @@
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "discover": "tsx cli/discover.ts",
+    "discover:claude": "tsx cli/discover-claude.ts",
     "regression": "tsx scripts/regression.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -17,10 +18,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
     "cheerio": "^1.0.0-rc.12",
     "commander": "^12.0.0",
     "pdf-parse": "^1.1.1",
     "playwright": "^1.41.0",
+    "sharp": "^0.33.2",
     "zod": "^3.22.4"
   },
   "devDependencies": {
