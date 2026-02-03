@@ -2,60 +2,25 @@ name: Test Multiple Fairs
 
 on:
   workflow_dispatch:
-    inputs:
-      fair_set:
-        description: 'Which set of fairs to test'
-        required: true
-        default: 'german_top5'
-        type: choice
-        options:
-          - german_top5
-          - international_top5
-          - custom
 
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
-      fail-fast: false  # Continue other tests if one fails
+      fail-fast: false
       matrix:
-        include:
-          # German Top 5
-          - fair: "Fruit Logistica"
+        fair:
+          - name: "Fruit Logistica"
             url: "https://www.fruitlogistica.com"
-            set: "german_top5"
-          - fair: "Ambiente"
+          - name: "Ambiente"
             url: "https://ambiente.messefrankfurt.com"
-            set: "german_top5"
-          - fair: "bauma"
+          - name: "bauma"
             url: "https://bauma.de"
-            set: "german_top5"
-          - fair: "Hannover Messe"
+          - name: "Hannover Messe"
             url: "https://www.hannovermesse.de"
-            set: "german_top5"
-          - fair: "MEDICA"
+          - name: "MEDICA"
             url: "https://www.medica.de"
-            set: "german_top5"
-          # International Top 5
-          - fair: "ISE"
-            url: "https://www.iseurope.org"
-            set: "international_top5"
-          - fair: "CES"
-            url: "https://www.ces.tech"
-            set: "international_top5"
-          - fair: "Mobile World Congress"
-            url: "https://www.mwcbarcelona.com"
-            set: "international_top5"
-          - fair: "Gitex"
-            url: "https://www.gitex.com"
-            set: "international_top5"
-          - fair: "Web Summit"
-            url: "https://websummit.com"
-            set: "international_top5"
-
-    # Only run fairs matching the selected set (or all if custom)
-    if: ${{ inputs.fair_set == 'custom' || matrix.set == inputs.fair_set }}
 
     steps:
       - name: Checkout code
@@ -77,21 +42,20 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
 
-      - name: Run Discovery for ${{ matrix.fair }}
+      - name: Run Discovery for ${{ matrix.fair.name }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           echo "========================================"
-          echo "Testing: ${{ matrix.fair }}"
-          echo "URL: ${{ matrix.url }}"
+          echo "Testing: ${{ matrix.fair.name }}"
+          echo "URL: ${{ matrix.fair.url }}"
           echo "========================================"
 
-          # Create safe filename
-          SAFE_NAME=$(echo "${{ matrix.fair }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+          SAFE_NAME=$(echo "${{ matrix.fair.name }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
 
           pnpm discover:claude \
-            --name "${{ matrix.fair }}" \
-            --url "${{ matrix.url }}" \
+            --name "${{ matrix.fair.name }}" \
+            --url "${{ matrix.fair.url }}" \
             --output "outputs/${SAFE_NAME}.json" \
             --report "reports/${SAFE_NAME}.md" \
             --debug || true
@@ -99,9 +63,9 @@ jobs:
       - name: Show Results
         if: always()
         run: |
-          SAFE_NAME=$(echo "${{ matrix.fair }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+          SAFE_NAME=$(echo "${{ matrix.fair.name }}" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
           echo "========================================"
-          echo "RESULTS: ${{ matrix.fair }}"
+          echo "RESULTS: ${{ matrix.fair.name }}"
           echo "========================================"
           cat "outputs/${SAFE_NAME}.json" 2>/dev/null || echo "No output"
 
@@ -109,13 +73,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ matrix.fair }}
+          name: results-${{ matrix.fair.name }}
           path: |
             outputs/
             reports/
           retention-days: 30
 
-  # Summary job that runs after all tests
   summary:
     runs-on: ubuntu-latest
     needs: test
@@ -133,22 +96,20 @@ jobs:
           echo "| Fair | Floorplan | Manual | Rules | Schedule | Directory |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-----------|--------|-------|----------|-----------|" >> $GITHUB_STEP_SUMMARY
 
-          for dir in all-results/results-*/outputs/*.json; do
-            if [ -f "$dir" ]; then
-              FAIR=$(jq -r '.fair_name' "$dir" 2>/dev/null || echo "Unknown")
-              FP=$(jq -r '.quality.floorplan' "$dir" 2>/dev/null || echo "?")
-              MAN=$(jq -r '.quality.exhibitor_manual' "$dir" 2>/dev/null || echo "?")
-              RULES=$(jq -r '.quality.rules' "$dir" 2>/dev/null || echo "?")
-              SCHED=$(jq -r '.quality.schedule' "$dir" 2>/dev/null || echo "?")
-              DIR=$(jq -r '.quality.exhibitor_directory' "$dir" 2>/dev/null || echo "?")
+          for file in all-results/results-*/outputs/*.json; do
+            if [ -f "$file" ]; then
+              FAIR=$(jq -r '.fair_name' "$file" 2>/dev/null || echo "Unknown")
+              FP=$(jq -r '.quality.floorplan' "$file" 2>/dev/null || echo "missing")
+              MAN=$(jq -r '.quality.exhibitor_manual' "$file" 2>/dev/null || echo "missing")
+              RULES=$(jq -r '.quality.rules' "$file" 2>/dev/null || echo "missing")
+              SCHED=$(jq -r '.quality.schedule' "$file" 2>/dev/null || echo "missing")
+              DIR=$(jq -r '.quality.exhibitor_directory' "$file" 2>/dev/null || echo "missing")
 
-              # Convert to emoji
-              fp_icon=$([[ "$FP" == "strong" ]] && echo "✅" || ([[ "$FP" == "weak" ]] && echo "⚠️" || echo "❌"))
-              man_icon=$([[ "$MAN" == "strong" ]] && echo "✅" || ([[ "$MAN" == "weak" ]] && echo "⚠️" || echo "❌"))
-              rules_icon=$([[ "$RULES" == "strong" ]] && echo "✅" || ([[ "$RULES" == "weak" ]] && echo "⚠️" || echo "❌"))
-              sched_icon=$([[ "$SCHED" == "strong" ]] && echo "✅" || ([[ "$SCHED" == "weak" ]] && echo "⚠️" || echo "❌"))
-              dir_icon=$([[ "$DIR" == "strong" ]] && echo "✅" || ([[ "$DIR" == "weak" ]] && echo "⚠️" || echo "❌"))
+              get_icon() { [[ "$1" == "strong" ]] && echo "✅" || ([[ "$1" == "weak" ]] && echo "⚠️" || echo "❌"); }
 
-              echo "| $FAIR | $fp_icon | $man_icon | $rules_icon | $sched_icon | $dir_icon |" >> $GITHUB_STEP_SUMMARY
+              echo "| $FAIR | $(get_icon $FP) | $(get_icon $MAN) | $(get_icon $RULES) | $(get_icon $SCHED) | $(get_icon $DIR) |" >> $GITHUB_STEP_SUMMARY
             fi
           done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ = strong | ⚠️ = weak | ❌ = missing" >> $GITHUB_STEP_SUMMARY
