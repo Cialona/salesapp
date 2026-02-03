@@ -235,4 +235,64 @@ export class BrowserController {
   getDisplaySize(): { width: number; height: number } {
     return { width: this.width, height: this.height };
   }
+
+  // Extract all links from the current page - this is key for finding PDFs!
+  async extractLinks(): Promise<Array<{ url: string; text: string; isPdf: boolean }>> {
+    if (!this.page) throw new Error('Browser not launched');
+
+    // Use $$eval to extract links directly from the DOM
+    const links = await this.page.$$eval('a[href]', (anchors) =>
+      anchors.map((a) => ({
+        href: a.getAttribute('href') || '',
+        text: (a.textContent || '').trim(),
+      })).filter((link) => link.href.length > 0)
+    );
+
+    const baseUrl = this.page.url();
+    const base = new URL(baseUrl);
+
+    return links.map(link => {
+      let fullUrl = link.href;
+
+      // Convert relative URLs to absolute
+      if (link.href.startsWith('/')) {
+        fullUrl = `${base.protocol}//${base.host}${link.href}`;
+      } else if (!link.href.startsWith('http')) {
+        fullUrl = new URL(link.href, baseUrl).href;
+      }
+
+      return {
+        url: fullUrl,
+        text: link.text.slice(0, 100), // Limit text length
+        isPdf: fullUrl.toLowerCase().endsWith('.pdf') ||
+               fullUrl.toLowerCase().includes('/pdf/') ||
+               link.text.toLowerCase().includes('pdf'),
+      };
+    });
+  }
+
+  // Get relevant links for trade fair research
+  async getRelevantLinks(): Promise<{
+    pdfLinks: Array<{ url: string; text: string }>;
+    downloadLinks: Array<{ url: string; text: string }>;
+    exhibitorLinks: Array<{ url: string; text: string }>;
+    allLinks: Array<{ url: string; text: string; isPdf: boolean }>;
+  }> {
+    const allLinks = await this.extractLinks();
+
+    const pdfLinks = allLinks.filter(l => l.isPdf);
+
+    const downloadKeywords = ['download', 'document', 'pdf', 'file', 'media', 'asset'];
+    const downloadLinks = allLinks.filter(l =>
+      downloadKeywords.some(kw => l.url.toLowerCase().includes(kw) || l.text.toLowerCase().includes(kw))
+    );
+
+    const exhibitorKeywords = ['exhibitor', 'aussteller', 'manual', 'handbook', 'guideline',
+      'richtlinie', 'technical', 'floor', 'plan', 'hall', 'schedule', 'timeline', 'directory'];
+    const exhibitorLinks = allLinks.filter(l =>
+      exhibitorKeywords.some(kw => l.url.toLowerCase().includes(kw) || l.text.toLowerCase().includes(kw))
+    );
+
+    return { pdfLinks, downloadLinks, exhibitorLinks, allLinks };
+  }
 }
