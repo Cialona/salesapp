@@ -174,15 +174,15 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
           model: 'claude-sonnet-4-20250514',
           max_tokens: 4096,
           system: SYSTEM_PROMPT,
-          betas: ['computer-use-2024-10-22'],
+          betas: ['computer-use-2025-01-24'],
           tools: [
             {
-              type: 'computer_20241022' as const,
+              type: 'computer_20250124' as const,
               name: 'computer',
               display_width_px: screenshot.width,
               display_height_px: screenshot.height,
               display_number: 1,
-            } as Anthropic.Beta.Messages.BetaToolComputerUse20241022,
+            } as Anthropic.Beta.Messages.BetaToolComputerUse20250124,
           ],
           messages,
         });
