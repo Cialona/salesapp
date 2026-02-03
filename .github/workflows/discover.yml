@@ -1,0 +1,82 @@
+name: Trade Fair Discovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      fair_name:
+        description: 'Name of the trade fair'
+        required: true
+        default: 'Fruit Logistica'
+        type: string
+      fair_url:
+        description: 'URL of the trade fair website'
+        required: true
+        default: 'https://www.fruitlogistica.com'
+        type: string
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run Trade Fair Discovery
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "========================================"
+          echo "Discovering: ${{ inputs.fair_name }}"
+          echo "URL: ${{ inputs.fair_url }}"
+          echo "========================================"
+
+          pnpm discover:claude \
+            --name "${{ inputs.fair_name }}" \
+            --url "${{ inputs.fair_url }}" \
+            --output "outputs/result.json" \
+            --report "reports/result.md" \
+            --debug
+
+      - name: Show JSON Output
+        if: always()
+        run: |
+          echo "========================================"
+          echo "JSON OUTPUT"
+          echo "========================================"
+          cat outputs/result.json 2>/dev/null || echo "No JSON output generated"
+
+      - name: Show Markdown Report
+        if: always()
+        run: |
+          echo "========================================"
+          echo "MARKDOWN REPORT"
+          echo "========================================"
+          cat reports/result.md 2>/dev/null || echo "No report generated"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-results-${{ github.run_number }}
+          path: |
+            outputs/
+            reports/
+          retention-days: 30
