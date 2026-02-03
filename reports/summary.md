@@ -1,47 +1,54 @@
 # Trade Fair Discovery - Regression Summary
 
-**Generated:** (run `pnpm regression` to generate actual results)
+**Generated:** 2026-02-03T16:49:42.408Z
 
 ## Overall Results
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 10 |
-| Passed | - |
-| Failed | - |
-| Pass rate | - |
+| Total tests | 1 |
+| Passed | 0 ✅ |
+| Failed | 1 ❌ |
+| Pass rate | 0% |
 
 ## Scorecard
 
 | ID | Fair | Official URL | Floorplan | Manual | Rules | Schedule | Directory | Schedule# | Blocked | Result |
 |----|------|--------------|-----------|--------|-------|----------|-----------|-----------|---------|--------|
-| fruit-logistica-2025 | Fruit Logistica | - | - | - | - | - | - | - | - | - |
-| ise-2025 | ISE | - | - | - | - | - | - | - | - | - |
-| ambiente-2025 | Ambiente | - | - | - | - | - | - | - | - | - |
-| bauma-2025 | bauma | - | - | - | - | - | - | - | - | - |
-| hannover-messe-2025 | Hannover Messe | - | - | - | - | - | - | - | - | - |
-| anuga-2025 | Anuga | - | - | - | - | - | - | - | - | - |
-| medica-2025 | MEDICA | - | - | - | - | - | - | - | - | - |
-| interzum-2025 | interzum | - | - | - | - | - | - | - | - | - |
-| drupa-2024 | drupa | - | - | - | - | - | - | - | - | - |
-| automechanika-2024 | Automechanika | - | - | - | - | - | - | - | - | - |
+| fruit-logistica-2025 | Fruit Logistica | - | ❌ | ❌ | ❌ | ❌ | ❌ | 0 | 1 | ❌ FAIL |
 
-## How to Run
+## Failed Tests Details
 
-```bash
-# Install dependencies
-pnpm install
+### Fruit Logistica (fruit-logistica-2025)
 
-# Install Playwright browser
-pnpm exec playwright install chromium
-
-# Run regression tests
-pnpm regression
-
-# Run specific test
-pnpm regression fruit-logistica-2025
-```
+**Failures:**
+- Expected official domain fruitlogistica.com, got null
+- Expected exhibitor manual, but quality is missing
+- Expected schedule data, but none found
 
 ## Quality Distribution
 
-Run the regression to see quality distribution across all fields.
+### floorplan
+- Strong: 0 (0%)
+- Weak: 0 (0%)
+- Missing: 1 (100%)
+
+### exhibitor_manual
+- Strong: 0 (0%)
+- Weak: 0 (0%)
+- Missing: 1 (100%)
+
+### rules
+- Strong: 0 (0%)
+- Weak: 0 (0%)
+- Missing: 1 (100%)
+
+### schedule
+- Strong: 0 (0%)
+- Weak: 0 (0%)
+- Missing: 1 (100%)
+
+### exhibitor_directory
+- Strong: 0 (0%)
+- Weak: 0 (0%)
+- Missing: 1 (100%)
