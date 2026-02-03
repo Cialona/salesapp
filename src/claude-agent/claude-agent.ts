@@ -33,60 +33,50 @@ type BetaContentBlock = Anthropic.Beta.Messages.BetaContentBlock;
 type BetaToolUseBlock = Anthropic.Beta.Messages.BetaToolUseBlock;
 type BetaMessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 
-const SYSTEM_PROMPT = `Je bent een onderzoeksagent gespecialiseerd in het vinden van informatie voor beursdeelnemers (exhibitors).
+const SYSTEM_PROMPT = `Je bent een efficiënte onderzoeksagent die exhibitor documenten vindt op beurs websites.
 
-JOUW TAAK:
-Navigeer naar de gegeven beurswebsite en vind de volgende informatie:
+=== DOEL ===
+Vind deze documenten voor standbouwers:
+1. Exhibitor Manual/Handbook (PDF met instructies voor exposanten)
+2. Floor Plan/Hall Plan (plattegrond beurshallen)
+3. Technical Guidelines (standbouw voorschriften)
+4. Build-up/Tear-down Schedule (opbouw/afbouw tijden)
+5. Exhibitor Directory (lijst van exposanten)
 
-1. **Exhibitor Manual / Handbook** (PDF)
-   - Zoek in: "For Exhibitors", "Exhibitor Service", "Download Center", "Downloads"
-   - Meestal een PDF genaamd "Exhibitor Manual", "Handbook", "Service Manual", "Keep in Mind"
+=== SNELLE STRATEGIE (max 15 stappen!) ===
 
-2. **Floor Plan / Hall Plan**
-   - Plattegrond van de beurshallen
-   - Zoek in: "Venue", "Floor Plan", "Hall Plan", "Site Map"
+1. Kijk naar de navigatie - zoek "Exhibitors", "For Exhibitors", "Service", "Downloads"
+2. Ga direct naar het Download Center of Downloads pagina
+3. Scan alle PDF links - noteer URLs van relevante documenten
+4. Check of er een exhibitor directory/lijst is
+5. STOP zodra je de belangrijkste documenten hebt gevonden
 
-3. **Technical Guidelines / Rules**
-   - Technische richtlijnen, standbouw voorschriften
-   - Zoek in: "Technical Guidelines", "Regulations", "Stand Construction"
+=== HERKEN DOCUMENTEN AAN ===
+- Exhibitor Manual: "manual", "handbook", "guide", "brochure", "service"
+- Floor Plan: "hall plan", "floor plan", "site map", "venue"
+- Technical Guidelines: "technical", "guidelines", "regulations", "construction"
+- Schedule: "timeline", "dates", "build-up", "set-up", "move-in"
 
-4. **Build-up & Tear-down Schedule**
-   - Opbouw en afbouw tijden met exacte datums
-   - BELANGRIJK: Dit staat vaak IN de Exhibitor Manual PDF
-   - Zoek naar: "Build-up", "Set-up", "Move-in", "Aufbau"
-   - En: "Tear-down", "Dismantling", "Move-out", "Abbau"
+=== REGELS ===
+- WEES EFFICIËNT - niet meer dan 15 acties nodig
+- Noteer volledige URLs (https://...)
+- Als Download Center gevonden, scan snel ALLE categorieën
+- Stop als je 3+ documenten hebt gevonden
 
-5. **Exhibitor Directory**
-   - Lijst of zoekmachine voor exposanten
-   - Zoek in: "Exhibitors", "Exhibitor List", "Find Exhibitors"
-
-STRATEGIE:
-1. Begin op de homepage
-2. Zoek naar "For Exhibitors" of "Exhibitor Service" sectie
-3. Zoek naar "Download Center" of "Downloads" - dit is vaak een goudmijn
-4. Open PDFs en noteer wat je vindt
-5. Noteer alle URLs die je vindt
-
-BELANGRIJK:
-- Blijf op het officiële domein van de beurs
-- Als je een PDF link ziet, noteer de volledige URL
-- Als je schedule informatie vindt, noteer exacte datums en tijden
-- Beschrijf wat je ziet en wat je doet bij elke stap
-
-OUTPUT FORMAT:
-Wanneer je klaar bent, geef een samenvatting in dit JSON format:
+=== OUTPUT ===
+Geef resultaat als JSON zodra je klaar bent:
 \`\`\`json
 {
   "floorplan_url": "URL of null",
   "exhibitor_manual_url": "URL of null",
   "rules_url": "URL of null",
   "exhibitor_directory_url": "URL of null",
-  "schedule": {
-    "build_up": [{"date": "YYYY-MM-DD", "time": "HH:MM-HH:MM", "description": "..."}],
-    "tear_down": [{"date": "YYYY-MM-DD", "time": "HH:MM-HH:MM", "description": "..."}]
-  },
   "downloads_page_url": "URL of null",
-  "notes": "Beschrijving van je zoekpad en bevindingen"
+  "schedule": {
+    "build_up": [{"date": "YYYY-MM-DD", "time": "HH:MM", "description": "..."}],
+    "tear_down": [{"date": "YYYY-MM-DD", "time": "HH:MM", "description": "..."}]
+  },
+  "notes": "Kort: wat je vond en waar"
 }
 \`\`\``;
 
@@ -106,8 +96,10 @@ export class ClaudeAgent {
     this.client = new Anthropic({
       apiKey: options.apiKey || process.env['ANTHROPIC_API_KEY'],
     });
-    this.browser = new BrowserController(1280, 800);
-    this.maxIterations = options.maxIterations || 50;
+    // Smaller viewport = smaller screenshots = lower costs
+    this.browser = new BrowserController(1024, 768);
+    // Max 20 iterations should be enough - keeps costs under $1
+    this.maxIterations = options.maxIterations || 20;
     this.debug = options.debug || false;
   }
 
