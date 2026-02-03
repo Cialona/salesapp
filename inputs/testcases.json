@@ -1,0 +1,129 @@
+[
+  {
+    "id": "fruit-logistica-2025",
+    "fair_name": "Fruit Logistica",
+    "known_url": "https://www.fruitlogistica.com",
+    "city": "Berlin",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "fruitlogistica.com",
+      "has_manual": true,
+      "has_schedule": true,
+      "schedule_in_pdf": true,
+      "min_schedule_entries": 2
+    }
+  },
+  {
+    "id": "ise-2025",
+    "fair_name": "ISE",
+    "known_url": "https://www.iseurope.org",
+    "city": "Barcelona",
+    "country": "Spain",
+    "expected": {
+      "official_domain": "iseurope.org",
+      "has_manual": true,
+      "has_floorplan": true,
+      "has_directory": true
+    }
+  },
+  {
+    "id": "ambiente-2025",
+    "fair_name": "Ambiente",
+    "known_url": "https://ambiente.messefrankfurt.com",
+    "city": "Frankfurt",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "messefrankfurt.com",
+      "has_manual": true,
+      "has_rules": true,
+      "has_floorplan": true
+    }
+  },
+  {
+    "id": "bauma-2025",
+    "fair_name": "bauma",
+    "known_url": "https://bauma.de",
+    "city": "Munich",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "bauma.de",
+      "has_manual": true,
+      "has_schedule": true,
+      "has_directory": true
+    }
+  },
+  {
+    "id": "hannover-messe-2025",
+    "fair_name": "Hannover Messe",
+    "known_url": "https://www.hannovermesse.de",
+    "city": "Hannover",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "hannovermesse.de",
+      "has_manual": true,
+      "has_floorplan": true,
+      "has_directory": true
+    }
+  },
+  {
+    "id": "anuga-2025",
+    "fair_name": "Anuga",
+    "known_url": "https://www.anuga.com",
+    "city": "Cologne",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "anuga.com",
+      "has_manual": true,
+      "has_rules": true
+    }
+  },
+  {
+    "id": "medica-2025",
+    "fair_name": "MEDICA",
+    "known_url": "https://www.medica-tradefair.com",
+    "city": "Düsseldorf",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "medica-tradefair.com",
+      "has_manual": true,
+      "has_floorplan": true,
+      "has_directory": true
+    }
+  },
+  {
+    "id": "interzum-2025",
+    "fair_name": "interzum",
+    "known_url": "https://www.interzum.com",
+    "city": "Cologne",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "interzum.com",
+      "has_manual": true,
+      "has_rules": true
+    }
+  },
+  {
+    "id": "drupa-2024",
+    "fair_name": "drupa",
+    "known_url": "https://www.drupa.com",
+    "city": "Düsseldorf",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "drupa.com",
+      "has_manual": true,
+      "has_floorplan": true
+    }
+  },
+  {
+    "id": "automechanika-2024",
+    "fair_name": "Automechanika",
+    "known_url": "https://automechanika.messefrankfurt.com",
+    "city": "Frankfurt",
+    "country": "Germany",
+    "expected": {
+      "official_domain": "messefrankfurt.com",
+      "has_manual": true,
+      "has_directory": true
+    }
+  }
+]
