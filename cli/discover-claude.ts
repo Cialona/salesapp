@@ -12,6 +12,21 @@ import * as path from 'node:path';
 import { ClaudeAgent } from '../src/claude-agent/claude-agent.js';
 import { TestCaseInput, DiscoveryOutput } from '../src/schemas/output.js';
 
+// Load .env file if it exists
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  const envContent = fs.readFileSync(envPath, 'utf-8');
+  for (const line of envContent.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith('#')) {
+      const [key, ...valueParts] = trimmed.split('=');
+      if (key && valueParts.length > 0) {
+        process.env[key] = valueParts.join('=');
+      }
+    }
+  }
+}
+
 program
   .name('discover-claude')
   .description('Trade Fair Discovery using Claude Computer Use API')
