@@ -265,10 +265,42 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
         for (const toolUse of toolUseBlocks) {
           if (toolUse.name === 'computer') {
             const result = await this.executeComputerAction(toolUse.input as Record<string, unknown>);
+
+            // After navigation actions, extract and include relevant links
+            // This gives Claude the same capabilities as ChatGPT's browsing tool
+            let linkInfo = '';
+            const action = (toolUse.input as Record<string, unknown>)['action'] as string;
+            if (['left_click', 'key', 'type'].includes(action)) {
+              try {
+                const relevantLinks = await this.browser.getRelevantLinks();
+
+                if (relevantLinks.pdfLinks.length > 0) {
+                  linkInfo += '\n\n📄 PDF LINKS OP DEZE PAGINA:\n';
+                  for (const link of relevantLinks.pdfLinks.slice(0, 15)) {
+                    linkInfo += `• ${link.text || 'PDF'}: ${link.url}\n`;
+                  }
+                }
+
+                if (relevantLinks.exhibitorLinks.length > 0 && relevantLinks.pdfLinks.length < 5) {
+                  linkInfo += '\n\n🔗 RELEVANTE LINKS:\n';
+                  for (const link of relevantLinks.exhibitorLinks.slice(0, 10)) {
+                    linkInfo += `• ${link.text}: ${link.url}\n`;
+                  }
+                }
+              } catch {
+                // Ignore link extraction errors
+              }
+            }
+
+            // Add link info to the result
+            const resultWithLinks = linkInfo
+              ? [...(Array.isArray(result) ? result : []), { type: 'text' as const, text: linkInfo }]
+              : result;
+
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolUse.id,
-              content: result,
+              content: resultWithLinks as Anthropic.Beta.Messages.BetaToolResultBlockParam['content'],
             });
           }
         }
