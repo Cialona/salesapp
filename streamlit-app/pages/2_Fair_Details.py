@@ -124,10 +124,12 @@ with tab_docs:
     def render_doc_card(doc_key: str, url_key: str, col):
         doc_info = DOCUMENT_TYPES.get(doc_key, {})
         url = docs.get(url_key)
-        found = doc_status.get(doc_key, False)
+        # Ensure url is a valid string
+        if url and not isinstance(url, str):
+            url = str(url) if url else None
+        found = bool(url) and isinstance(url, str) and url.startswith('http')
 
         with col:
-            status_class = "doc-found" if found else "doc-missing"
             status_icon = "✅" if found else "❌"
 
             st.markdown(f"""
@@ -144,7 +146,7 @@ with tab_docs:
             </div>
             """, unsafe_allow_html=True)
 
-            if url:
+            if found and url:
                 st.link_button(f"📥 Openen", url, use_container_width=True, key=f"open_{doc_key}")
             else:
                 st.button("❌ Niet gevonden", disabled=True, use_container_width=True, key=f"missing_{doc_key}")
