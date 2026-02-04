@@ -13,6 +13,8 @@ from datetime import datetime
 import os
 
 import anthropic
+import socket
+from urllib.parse import urlparse
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -61,18 +63,49 @@ def ensure_playwright_installed():
             return False
 
 
-def find_fair_website(api_key: str, fair_name: str, year: int, city: str = None) -> dict:
+def validate_url(url: str) -> bool:
+    """Check if a URL's domain resolves and is reachable."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        # Try DNS resolution
+        socket.gethostbyname(hostname)
+        return True
+    except (socket.gaierror, socket.herror, Exception):
+        return False
+
+
+def find_fair_website(api_key: str, fair_name: str, year: int, city: str = None, failed_url: str = None) -> dict:
     """Use Claude to find the official website URL for a trade fair."""
     client = anthropic.Anthropic(api_key=api_key)
 
-    prompt = f"""Find the official website URL for this trade fair:
+    error_context = ""
+    if failed_url:
+        error_context = f"""
+
+IMPORTANT: The previously suggested URL "{failed_url}" was INVALID (domain does not exist).
+Please double-check the exact spelling of the domain name and provide a CORRECT URL.
+Common mistakes: typos in domain names like "salonilemilano" instead of "salonemilano".
+"""
+
+    prompt = f"""Find the official website URL for this trade fair:{error_context}
 
 Trade Fair: {fair_name}
 Year: {year}
 {f'City: {city}' if city else ''}
 
+CRITICAL: Double-check the EXACT spelling of the domain name! Common trade fair websites:
+- Salone del Mobile: salonemilano.it (NOT salonilemilano)
+- Ambiente: ambiente.messefrankfurt.com
+- bauma: bauma.de
+- ISPO Munich: ispo.com
+
 Return ONLY a JSON object with these fields:
-- url: The official website URL (the exhibitor/aussteller section if possible)
+- url: The official website URL (the exhibitor/aussteller section if possible). VERIFY SPELLING!
 - confidence: "high", "medium", or "low"
 - notes: Brief explanation
 
@@ -221,17 +254,35 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
         status_text.text("Officiële website zoeken...")
         progress_bar.progress(5)
 
-        website_result = find_fair_website(api_key, fair_name, fair_year, fair_city)
-        fair_url = website_result.get("url")
-        confidence = website_result.get("confidence", "low")
-        notes = website_result.get("notes", "")
+        fair_url = None
+        max_url_attempts = 3
+        failed_url = None
 
-        if fair_url:
-            update_logs(f"✅ Website gevonden: {fair_url}")
-            update_logs(f"   Zekerheid: {confidence} - {notes}")
-        else:
-            update_logs(f"⚠️ Geen website gevonden, probeer met Google zoeken...")
-            fair_url = None  # Will trigger Google search in agent
+        for attempt in range(max_url_attempts):
+            website_result = find_fair_website(api_key, fair_name, fair_year, fair_city, failed_url=failed_url)
+            candidate_url = website_result.get("url")
+            confidence = website_result.get("confidence", "low")
+            notes = website_result.get("notes", "")
+
+            if candidate_url:
+                update_logs(f"🔗 URL gevonden: {candidate_url}")
+                update_logs(f"   Zekerheid: {confidence} - {notes}")
+
+                # Validate the URL
+                status_text.text("URL valideren...")
+                if validate_url(candidate_url):
+                    update_logs(f"✅ URL gevalideerd!")
+                    fair_url = candidate_url
+                    break
+                else:
+                    update_logs(f"⚠️ URL ongeldig (domein bestaat niet), opnieuw zoeken...")
+                    failed_url = candidate_url
+            else:
+                update_logs(f"⚠️ Geen URL gevonden: {notes}")
+                break
+
+        if not fair_url:
+            update_logs(f"⚠️ Geen geldige website gevonden, agent zal zelf zoeken...")
 
         progress_bar.progress(10)
 
