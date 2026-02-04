@@ -1,0 +1,8 @@
+#!/bin/bash
+# Post-build script for Streamlit Cloud
+# Installs Playwright browsers for headless browsing
+
+echo "Installing Playwright Chromium browser..."
+playwright install chromium --with-deps
+
+echo "Playwright installation complete."
