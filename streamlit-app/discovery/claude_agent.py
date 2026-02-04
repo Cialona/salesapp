@@ -7,8 +7,9 @@ import asyncio
 import json
 import re
 import time
+import aiohttp
 from typing import Optional, List, Dict, Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import anthropic
 
@@ -186,6 +187,99 @@ class ClaudeAgent:
             print(message)
         self.on_status(message)
 
+    async def _pre_scan_website(self, base_url: str) -> Dict[str, Any]:
+        """
+        Pre-scan the website by fetching HTML and extracting document links.
+        This runs BEFORE Computer Use to find documents that might be hidden.
+        """
+        self._log("🔎 Pre-scanning website for documents...")
+
+        results = {
+            'pdf_links': [],
+            'document_pages': [],
+            'exhibitor_pages': [],
+            'all_links': []
+        }
+
+        parsed_base = urlparse(base_url)
+        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
+        # URLs to try scanning
+        urls_to_scan = [base_url]
+
+        # Add common document page patterns
+        common_paths = [
+            '/en/exhibitors', '/exhibitors', '/en/participate', '/participate',
+            '/en/services', '/services', '/en/downloads', '/downloads',
+            '/en/information', '/information', '/en/planning', '/planning',
+            '/for-exhibitors', '/aussteller', '/espositori', '/partecipare',
+        ]
+
+        for path in common_paths:
+            urls_to_scan.append(f"{base_domain}{path}")
+
+        # Keywords that indicate important document links
+        doc_keywords = [
+            'technical', 'regulation', 'provision', 'guideline', 'manual',
+            'handbook', 'richtlin', 'regolamento', 'standbau', 'construction',
+            'setup', 'dismant', 'aufbau', 'abbau', 'montaggio', 'allestimento',
+            'floor', 'plan', 'hall', 'gelaende', 'exhibitor', 'aussteller',
+        ]
+
+        async with aiohttp.ClientSession() as session:
+            for url in urls_to_scan[:10]:  # Limit to 10 URLs to avoid slowdown
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
+                        if response.status == 200:
+                            html = await response.text()
+
+                            # Extract all links using regex
+                            link_pattern = r'href=["\']([^"\']+)["\']'
+                            links = re.findall(link_pattern, html, re.IGNORECASE)
+
+                            for link in links:
+                                # Convert relative to absolute
+                                if link.startswith('/'):
+                                    full_url = f"{base_domain}{link}"
+                                elif link.startswith('http'):
+                                    full_url = link
+                                else:
+                                    full_url = urljoin(url, link)
+
+                                lower_url = full_url.lower()
+
+                                # Check for PDFs
+                                if '.pdf' in lower_url or '/sites/default/files/' in lower_url:
+                                    if full_url not in [p['url'] for p in results['pdf_links']]:
+                                        # Determine document type from URL
+                                        doc_type = 'unknown'
+                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.']):
+                                            doc_type = 'technical_guidelines'
+                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento']):
+                                            doc_type = 'exhibitor_manual'
+                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site']):
+                                            doc_type = 'floorplan'
+                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio']):
+                                            doc_type = 'schedule'
+
+                                        results['pdf_links'].append({
+                                            'url': full_url,
+                                            'type': doc_type,
+                                            'source_page': url
+                                        })
+
+                                # Check for exhibitor-related pages
+                                if any(kw in lower_url for kw in doc_keywords):
+                                    if full_url not in results['exhibitor_pages'] and not '.pdf' in lower_url:
+                                        results['exhibitor_pages'].append(full_url)
+
+                except Exception as e:
+                    self._log(f"Pre-scan error for {url}: {e}")
+                    continue
+
+        self._log(f"Pre-scan found {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
+        return results
+
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
         output = create_empty_output(input_data.fair_name)
@@ -195,22 +289,65 @@ class ClaudeAgent:
         start_time = time.time()
 
         try:
+            # PHASE 1: Pre-scan website for documents (HTML-based, fast)
+            start_url = input_data.known_url or f"https://www.google.com/search?q={input_data.fair_name}+official+website"
+
+            pre_scan_results = None
+            pre_scan_info = ""
+
+            if input_data.known_url:
+                pre_scan_results = await self._pre_scan_website(input_data.known_url)
+
+                # Format pre-scan results for the agent
+                if pre_scan_results['pdf_links']:
+                    pre_scan_info += "\n\n🎯 PRE-SCAN RESULTATEN - DOCUMENTEN GEVONDEN VOORAF:\n"
+                    pre_scan_info += "=" * 60 + "\n"
+
+                    # Group by type
+                    by_type = {}
+                    for pdf in pre_scan_results['pdf_links']:
+                        doc_type = pdf['type']
+                        if doc_type not in by_type:
+                            by_type[doc_type] = []
+                        by_type[doc_type].append(pdf)
+
+                    type_labels = {
+                        'technical_guidelines': '📋 TECHNISCHE RICHTLIJNEN',
+                        'exhibitor_manual': '📖 EXPOSANTEN HANDLEIDING',
+                        'floorplan': '🗺️ PLATTEGROND',
+                        'schedule': '📅 SCHEMA',
+                        'unknown': '📄 OVERIGE DOCUMENTEN'
+                    }
+
+                    for doc_type, pdfs in by_type.items():
+                        pre_scan_info += f"\n{type_labels.get(doc_type, doc_type)}:\n"
+                        for pdf in pdfs[:5]:  # Limit per category
+                            pre_scan_info += f"  ⭐ {pdf['url']}\n"
+
+                    pre_scan_info += "\n" + "=" * 60
+                    pre_scan_info += "\n💡 GEBRUIK goto_url om deze documenten direct te openen en valideren!\n"
+
+                if pre_scan_results['exhibitor_pages']:
+                    pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
+                    for page in pre_scan_results['exhibitor_pages'][:10]:
+                        pre_scan_info += f"  • {page}\n"
+
+            # PHASE 2: Launch browser for visual verification
             await self.browser.launch()
             self._log("Browser launched")
 
-            # Navigate to starting URL
-            start_url = input_data.known_url or f"https://www.google.com/search?q={input_data.fair_name}+official+website"
             await self.browser.goto(start_url)
             self._log(f"Navigated to: {start_url}")
 
-            # Build initial message
+            # Build initial message with pre-scan results
             user_message = f"""
 Vind informatie voor de beurs: {input_data.fair_name}
 {f'Stad: {input_data.city}' if input_data.city else ''}
 {f'Land: {input_data.country}' if input_data.country else ''}
 {f'Start URL: {input_data.known_url}' if input_data.known_url else ''}
+{pre_scan_info}
 
-Navigeer door de website en vind alle gevraagde documenten en informatie.
+{'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] else 'Navigeer door de website en vind alle gevraagde documenten.'}
 """
 
             # Get initial screenshot
