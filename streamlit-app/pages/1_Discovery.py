@@ -145,12 +145,14 @@ with col1:
     )
 
 with col2:
-    # Year selector - default to current or next year
+    # Year input - default to next year
     current_year = datetime.now().year
-    fair_year = st.selectbox(
+    fair_year = st.number_input(
         "Jaar *",
-        options=[current_year, current_year + 1, current_year + 2, current_year - 1],
-        index=0
+        min_value=2020,
+        max_value=2035,
+        value=current_year + 1,
+        step=1
     )
     fair_country = st.text_input(
         "Land",
