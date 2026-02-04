@@ -22,17 +22,79 @@ from .schemas import (
 SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 100% van de gevraagde informatie te vinden.
 
 === JOUW MISSIE ===
-Vind ALLE documenten en informatie die standbouwers nodig hebben:
+Vind ALLE documenten en informatie die standbouwers nodig hebben.
 
-1. **Floor Plan / Hall Plan** - Plattegrond van de beurshallen (PDF)
-   - Zoekwoorden: "Geländeplan", "Hallenplan", "Floor plan", "Site plan", "Hall overview"
-2. **Exhibitor Manual / Handbook** - Handleiding voor exposanten (PDF)
-   - Zoekwoorden: "Service Documentation", "Exhibitor Guide", "Ausstellerhandbuch", "Verkehrsleitfaden"
-3. **Technical Guidelines / Rules** - Technische voorschriften voor standbouw (PDF)
-   - Zoekwoorden: "Technical Guidelines", "Technische Richtlinien", "Stand Construction Regulations"
-4. **Build-up & Tear-down Schedule** - ALLE opbouw en afbouw datums met exacte tijden
-5. **Exhibitor Directory** - Lijst/zoekmachine voor exposanten
-   - Vaak op subdomein: exhibitors.beursnaam.de, aussteller.beursnaam.de
+=== VALIDATIE CRITERIA (KRITIEK!) ===
+
+Voor elk document MOET je valideren dat het aan de criteria voldoet voordat je het accepteert!
+
+**1. Floor Plan / Hall Plan (Plattegrond)**
+✅ MOET BEVATTEN:
+   - Visuele layout/kaart van beurshallen
+   - Standposities of halnummers
+   - Ingangen/uitgangen of routing
+❌ MAG NIET ZIJN:
+   - Stadsplattegrond of routebeschrijving naar de beurs
+   - Hotelkaart of parkeerkaart
+   - Marketing afbeelding zonder schaal/details
+🔍 Zoekwoorden: "Geländeplan", "Hallenplan", "Floor plan", "Site plan", "Hall overview"
+
+**2. Exhibitor Manual / Handbook (Exposanten Handleiding)**
+✅ MOET BEVATTEN:
+   - Regels en voorschriften voor exposanten
+   - Opbouw/afbouw procedures of deadlines
+   - Logistieke informatie (leveringen, badges, etc.)
+   - Do's en don'ts of praktische instructies
+❌ MAG NIET ZIJN:
+   - "Waarom exposeren" brochure (sales/marketing materiaal)
+   - Prijslijsten of verkoopmateriaal
+   - Bezoekersinformatie
+   - Algemene beursinformatie zonder exposant-specifieke instructies
+🔍 Zoekwoorden: "Service Documentation", "Exhibitor Guide", "Ausstellerhandbuch", "Verkehrsleitfaden"
+
+**3. Technical Guidelines / Rules (Technische Richtlijnen)**
+✅ MOET BEVATTEN:
+   - Stand afmetingen of constructie-eisen
+   - Elektra specificaties (ampère, voltage)
+   - Vloerbelasting of gewichtlimieten
+   - Brandveiligheidsvoorschriften
+   - Bouwhoogte restricties
+❌ MAG NIET ZIJN:
+   - Algemene huisregels zonder technische specs
+   - Marketing materiaal
+   - Prijslijsten voor technische services
+🔍 Zoekwoorden: "Technical Guidelines", "Technische Richtlinien", "Stand Construction Regulations"
+
+**4. Build-up & Tear-down Schedule (Schema/Tijdlijn)**
+✅ MOET BEVATTEN:
+   - CONCRETE datums (dag/maand/jaar)
+   - Specifieke tijden (bijv. 07:00-22:00)
+   - Opbouw én afbouw periodes
+❌ MAG NIET ZIJN:
+   - Vage "neem contact op voor data"
+   - Alleen beursdagen zonder opbouw/afbouw
+   - Generieke "X weken voor de beurs" zonder echte data
+🔍 Zoekwoorden: "Set-up and dismantling", "Aufbau und Abbau", "Timeline", "Termine"
+
+**5. Exhibitor Directory (Exposantenlijst)**
+✅ MOET BEVATTEN:
+   - Lijst met meerdere bedrijfsnamen
+   - Bij voorkeur: standnummers, halnummers, of zoekmachine
+❌ MAG NIET ZIJN:
+   - Sponsorlijst of partnerlijst (slechts enkele bedrijven)
+   - Bezoekersinformatie
+   - Één bedrijfsprofiel pagina
+🔍 Vaak op subdomein: exhibitors.beursnaam.de, aussteller.beursnaam.de
+
+=== VALIDATIE PROCES ===
+
+Bij het vinden van een document:
+1. OPEN of BEKIJK het document/de pagina
+2. CONTROLEER tegen de criteria hierboven
+3. ALS het NIET voldoet → ZOEK VERDER, accepteer het NIET
+4. ALS het WEL voldoet → Noteer de URL en ga door
+
+BELANGRIJK: Accepteer NIET te snel! Bij twijfel, zoek door naar een beter alternatief.
 
 === KRITIEK: GEBRUIK DE PDF LINKS! ===
 
@@ -58,19 +120,27 @@ Je hoeft NIET op de PDF te klikken. De URL die je ziet IS de directe download UR
 2. **Vind Download Center / Service Documentation**
    - Zoek: "Downloads", "Documents", "Service Documentation", "Downloadcenter"
    - BEKIJK de PDF links die verschijnen!
+   - ⚠️ VALIDEER elk document tegen de criteria!
 
 3. **Vind Schedule pagina**
    - Zoek: "Set-up and dismantling", "Aufbau und Abbau", "Timeline"
    - Noteer ALLE datums met tijden
+   - ⚠️ Alleen CONCRETE datums accepteren, geen vage info!
 
 4. **Vind Exhibitor Directory**
    - Zoek: "Exhibitor Search", "Find Exhibitors", "Ausstellerverzeichnis"
    - CHECK ook subdomeinen: exhibitors.[beursnaam].de of online.[beursnaam].com
    - Gebruik goto_url om subdomeinen te bezoeken!
+   - ⚠️ Moet echte bedrijvenlijst zijn, niet sponsorpagina!
 
-5. **Verzamel je resultaten**
+5. **VALIDEER voordat je accepteert**
+   - Open/bekijk elk gevonden document
+   - Check: voldoet het aan ALLE criteria?
+   - Bij twijfel: ZOEK DOOR naar beter alternatief!
+
+6. **Verzamel je resultaten**
    - Gebruik de PDF URLs die je hebt gezien in de link lijsten
-   - Geef je JSON output
+   - Geef je JSON output met validation_notes per document
 
 === TOOLS ===
 
@@ -89,15 +159,26 @@ Met: datum (YYYY-MM-DD), tijden (HH:MM-HH:MM), beschrijving
 
 === OUTPUT FORMAT ===
 
-Geef je resultaten als JSON. BELANGRIJK: Gebruik de EXACTE URLs die je hebt gezien!
+Geef je resultaten als JSON. BELANGRIJK:
+- Gebruik de EXACTE URLs die je hebt gezien!
+- Voeg validation_notes toe om te bewijzen dat elk document aan de criteria voldoet!
 
 ```json
 {
   "floorplan_url": "https://exacte-url-die-je-zag.pdf",
+  "floorplan_validation": "Bevat hallenplan met standposities en ingangen - VOLDOET",
+
   "exhibitor_manual_url": "https://exacte-url-die-je-zag.pdf",
+  "exhibitor_manual_validation": "Bevat opbouw regels, deadlines en logistieke info - VOLDOET",
+
   "rules_url": "https://exacte-url-die-je-zag.pdf",
+  "rules_validation": "Bevat elektra specs (16A/32A), bouwhoogte (4m max), brandveiligheid - VOLDOET",
+
   "exhibitor_directory_url": "https://exhibitors.beursnaam.de",
+  "exhibitor_directory_validation": "Lijst met 500+ bedrijven, zoekfunctie aanwezig - VOLDOET",
+
   "downloads_page_url": "https://url-naar-downloadcenter",
+
   "schedule": {
     "build_up": [
       {"date": "2026-01-29", "time": "07:00-24:00", "description": "Advanced set-up"},
@@ -107,11 +188,18 @@ Geef je resultaten als JSON. BELANGRIJK: Gebruik de EXACTE URLs die je hebt gezi
       {"date": "2026-02-10", "time": "17:00-24:00", "description": "Afbouw"}
     ]
   },
+  "schedule_validation": "Concrete datums gevonden: opbouw 29-31 jan, afbouw 10 feb met exacte tijden - VOLDOET",
+
   "notes": "Beschrijving van je zoekpad"
 }
 ```
 
-Gebruik null ALLEEN als je het echt niet kunt vinden."""
+⚠️ KRITIEK:
+- Gebruik null als je NIETS kunt vinden
+- Gebruik null + "_validation": "NIET GEVONDEN: reden" als je wel iets vond maar het NIET aan criteria voldeed
+- Voorbeeld: "exhibitor_manual_url": null, "exhibitor_manual_validation": "AFGEWEZEN: Gevonden doc was sales brochure, geen echte handleiding"
+
+Accepteer NOOIT documenten die niet aan de criteria voldoen!"""
 
 
 class ClaudeAgent:
@@ -202,7 +290,12 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
                 if iteration == self.max_iterations - 5:
                     messages.append({
                         "role": "user",
-                        "content": [{"type": "text", "text": "⚠️ Je hebt nog 5 acties over. Begin nu met je JSON samenvatting van wat je tot nu toe hebt gevonden. Geef de URLs die je hebt gezien."}],
+                        "content": [{"type": "text", "text": """⚠️ Je hebt nog 5 acties over. Begin nu met je JSON samenvatting.
+
+BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan de criteria voldoet!
+- Als een document NIET aan de criteria voldeed, zet url op null en leg uit waarom in validation
+- Wees EERLIJK: alleen "VOLDOET" als het echt aan alle criteria voldoet
+- Bij twijfel: "NIET GEVONDEN" is beter dan een verkeerd document accepteren"""}],
                     })
 
                 # Call Claude with computer use
@@ -565,33 +658,55 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
             json_str = json_match.group(1) if json_match.lastindex else json_match.group(0)
             result = json.loads(json_str)
 
-            # Map to output structure
-            if result.get("floorplan_url"):
+            # Helper to check if validation indicates document was rejected
+            def is_validated(validation_text: str) -> bool:
+                if not validation_text:
+                    return True  # No validation = assume valid (backward compat)
+                validation_lower = validation_text.lower()
+                rejected_keywords = ['afgewezen', 'niet gevonden', 'rejected', 'not found', 'voldoet niet', 'does not meet']
+                return not any(kw in validation_lower for kw in rejected_keywords)
+
+            # Map to output structure with validation checks
+            floorplan_validation = result.get("floorplan_validation", "")
+            if result.get("floorplan_url") and is_validated(floorplan_validation):
                 output.documents.floorplan_url = result["floorplan_url"]
                 output.quality.floorplan = "strong"
-                output.primary_reasoning.floorplan = "Found by Claude agent"
+                output.primary_reasoning.floorplan = floorplan_validation or "Found by Claude agent"
+            elif floorplan_validation:
+                output.primary_reasoning.floorplan = floorplan_validation
 
-            if result.get("exhibitor_manual_url"):
+            exhibitor_manual_validation = result.get("exhibitor_manual_validation", "")
+            if result.get("exhibitor_manual_url") and is_validated(exhibitor_manual_validation):
                 output.documents.exhibitor_manual_url = result["exhibitor_manual_url"]
                 output.quality.exhibitor_manual = "strong"
-                output.primary_reasoning.exhibitor_manual = "Found by Claude agent"
+                output.primary_reasoning.exhibitor_manual = exhibitor_manual_validation or "Found by Claude agent"
+            elif exhibitor_manual_validation:
+                output.primary_reasoning.exhibitor_manual = exhibitor_manual_validation
 
-            if result.get("rules_url"):
+            rules_validation = result.get("rules_validation", "")
+            if result.get("rules_url") and is_validated(rules_validation):
                 output.documents.rules_url = result["rules_url"]
                 output.quality.rules = "strong"
-                output.primary_reasoning.rules = "Found by Claude agent"
+                output.primary_reasoning.rules = rules_validation or "Found by Claude agent"
+            elif rules_validation:
+                output.primary_reasoning.rules = rules_validation
 
-            if result.get("exhibitor_directory_url"):
+            exhibitor_directory_validation = result.get("exhibitor_directory_validation", "")
+            if result.get("exhibitor_directory_url") and is_validated(exhibitor_directory_validation):
                 output.documents.exhibitor_directory_url = result["exhibitor_directory_url"]
                 output.quality.exhibitor_directory = "strong"
-                output.primary_reasoning.exhibitor_directory = "Found by Claude agent"
+                output.primary_reasoning.exhibitor_directory = exhibitor_directory_validation or "Found by Claude agent"
+            elif exhibitor_directory_validation:
+                output.primary_reasoning.exhibitor_directory = exhibitor_directory_validation
 
             if result.get("downloads_page_url"):
                 output.documents.downloads_overview_url = result["downloads_page_url"]
 
-            # Parse schedule
+            # Parse schedule with validation
             schedule = result.get("schedule", {})
-            if schedule:
+            schedule_validation = result.get("schedule_validation", "")
+
+            if schedule and is_validated(schedule_validation):
                 build_up = schedule.get("build_up", [])
                 if isinstance(build_up, list):
                     for entry in build_up:
@@ -614,7 +729,9 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
 
                 if output.schedule.build_up or output.schedule.tear_down:
                     output.quality.schedule = "strong"
-                    output.primary_reasoning.schedule = f"Found {len(output.schedule.build_up)} build-up and {len(output.schedule.tear_down)} tear-down entries"
+                    output.primary_reasoning.schedule = schedule_validation or f"Found {len(output.schedule.build_up)} build-up and {len(output.schedule.tear_down)} tear-down entries"
+            elif schedule_validation:
+                output.primary_reasoning.schedule = schedule_validation
 
             if result.get("notes"):
                 output.debug.notes.append(f"Agent notes: {result['notes']}")
