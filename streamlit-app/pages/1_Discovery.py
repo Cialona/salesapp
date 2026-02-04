@@ -315,7 +315,7 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
 
             agent = ClaudeAgent(
                 api_key=api_key,
-                max_iterations=30,
+                max_iterations=40,
                 debug=True,
                 on_status=update_logs
             )

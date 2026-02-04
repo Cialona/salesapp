@@ -319,21 +319,37 @@ class BrowserController:
 
         pdf_links = [l for l in all_links if l.is_pdf]
 
-        download_keywords = ['download', 'document', 'pdf', 'file', 'media', 'asset', 'content/dam', 'cloudfront']
+        # Expanded download keywords with CMS patterns
+        download_keywords = [
+            'download', 'document', 'pdf', 'file', 'media', 'asset',
+            'content/dam', 'cloudfront', 'sites/default/files',  # Drupal CMS
+            '/files/', '/docs/', '/downloads/', '/documents/',
+            'blob.core.windows.net', 's3.amazonaws.com'  # Cloud storage
+        ]
         download_links = [
             l for l in all_links
             if any(kw in l.url.lower() or kw in l.text.lower() for kw in download_keywords)
         ]
 
+        # Expanded exhibitor keywords with more languages
         exhibitor_keywords = [
             # English
             'exhibitor', 'manual', 'handbook', 'guideline', 'technical', 'floor', 'plan',
             'hall', 'schedule', 'timeline', 'directory', 'service', 'documentation',
             'set-up', 'dismantl', 'build-up', 'tear-down', 'construction', 'regulation',
+            'provision', 'sustainable', 'stand design', 'booth', 'catalogue', 'catalog',
+            'participate', 'preparation', 'planning',
             # German
             'aussteller', 'richtlinie', 'handbuch', 'leitfaden', 'technisch', 'gelände',
             'hallen', 'zeitplan', 'aufbau', 'abbau', 'standbau', 'verzeichnis',
-            'verkehr', 'vorschrift', 'termine',
+            'verkehr', 'vorschrift', 'termine', 'gelaende', 'messebau',
+            # Italian (for fairs like Salone del Mobile)
+            'espositore', 'espositori', 'regolamento', 'tecnico', 'montaggio', 'smontaggio',
+            'allestimento', 'partecipare', 'servizi', 'catalogo', 'padiglione',
+            # French
+            'exposant', 'règlement', 'technique', 'montage', 'démontage', 'stand',
+            # Spanish
+            'expositor', 'reglamento', 'técnico', 'montaje', 'desmontaje',
         ]
         exhibitor_links = [
             l for l in all_links

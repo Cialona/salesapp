@@ -19,134 +19,90 @@ from .schemas import (
 )
 
 
-SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 100% van de gevraagde informatie te vinden.
+SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 99% van de gevraagde informatie te vinden.
 
 === JOUW MISSIE ===
-Vind ALLE documenten en informatie die standbouwers nodig hebben.
+Vind ALLE documenten en informatie die standbouwers nodig hebben. Wees GRONDIG - de meeste beurzen HEBBEN deze documenten, je moet ze alleen VINDEN.
 
-=== VALIDATIE CRITERIA (KRITIEK!) ===
+=== KRITIEKE ZOEKSTRATEGIE ===
 
-Voor elk document MOET je valideren dat het aan de criteria voldoet voordat je het accepteert!
+**STAP 1: Identificeer de juiste secties (meerdere paden proberen!)**
+Zoek naar ALLE van deze menu-items/links:
+- "For Exhibitors" / "Exhibitors" / "Aussteller" / "Espositori" / "Participate" / "Partecipare"
+- "Planning" / "Preparation" / "Services" / "Information"
+- "Technical" / "Regulations" / "Guidelines" / "Rules"
+- "Stand Design" / "Stand Construction" / "Booth" / "Standbau"
+- "Downloads" / "Documents" / "Documentation" / "Downloadcenter"
+
+**STAP 2: Zoek naar verborgen document-secties**
+Veel websites verstoppen documenten achter:
+- Accordion/dropdown secties (klik op + of ▼ icons)
+- "Technical regulations" / "Regolamento tecnico" / "Technische Richtlinien"
+- "Provisions for stand design" / "Stand fitting regulations"
+- "Sustainable set-up" / "Green guidelines"
+- Subsecties binnen "Participate" of "How to exhibit"
+
+**STAP 3: Check ALLE PDF links op elke pagina**
+Na elke navigatie krijg je PDF links. ANALYSEER ze op:
+- Bestandsnamen met: "technical", "regulation", "provision", "manual", "guide", "plan", "richtlin"
+- CMS-paden zoals: /sites/default/files/, /content/dam/, /documents/, /downloads/
+- Jaarnummers in bestandsnaam (bijv. "2026", "Rev_02")
+
+**STAP 4: Probeer alternatieve URL-patronen**
+Als je de hoofdsite hebt gevonden, probeer ook:
+- exhibitors.[domain] of aussteller.[domain]
+- [domain]/en/exhibitors of [domain]/exhibitors
+- [domain]/en/participate of [domain]/services
+
+=== VALIDATIE CRITERIA ===
 
 **1. Floor Plan / Hall Plan (Plattegrond)**
-✅ MOET BEVATTEN:
-   - Visuele layout/kaart van beurshallen
-   - Standposities of halnummers
-   - Ingangen/uitgangen of routing
-❌ MAG NIET ZIJN:
-   - Stadsplattegrond of routebeschrijving naar de beurs
-   - Hotelkaart of parkeerkaart
-   - Marketing afbeelding zonder schaal/details
-🔍 Zoekwoorden: "Geländeplan", "Hallenplan", "Floor plan", "Site plan", "Hall overview"
+✅ MOET BEVATTEN: Visuele layout van hallen, standposities, halnummers, ingangen
+❌ MAG NIET: Stadskaart, routebeschrijving, hotelkaart
+🔍 Zoekwoorden: "Geländeplan", "Hallenplan", "Floor plan", "Site plan", "Hall overview", "Exhibition map"
 
 **2. Exhibitor Manual / Handbook (Exposanten Handleiding)**
-✅ MOET BEVATTEN:
-   - Regels en voorschriften voor exposanten
-   - Opbouw/afbouw procedures of deadlines
-   - Logistieke informatie (leveringen, badges, etc.)
-   - Do's en don'ts of praktische instructies
-❌ MAG NIET ZIJN:
-   - "Waarom exposeren" brochure (sales/marketing materiaal)
-   - Prijslijsten of verkoopmateriaal
-   - Bezoekersinformatie
-   - Algemene beursinformatie zonder exposant-specifieke instructies
-🔍 Zoekwoorden: "Service Documentation", "Exhibitor Guide", "Ausstellerhandbuch", "Verkehrsleitfaden"
+✅ MOET BEVATTEN: Regels/voorschriften, opbouw/afbouw procedures, deadlines, logistiek, do's & don'ts
+❌ MAG NIET: "Why exhibit" brochure, prijslijsten, sales materiaal
+🔍 Zoekwoorden: "Service Documentation", "Exhibitor Guide", "Ausstellerhandbuch", "Provisions for stand design", "Stand fitting"
 
 **3. Technical Guidelines / Rules (Technische Richtlijnen)**
-✅ MOET BEVATTEN:
-   - Stand afmetingen of constructie-eisen
-   - Elektra specificaties (ampère, voltage)
-   - Vloerbelasting of gewichtlimieten
-   - Brandveiligheidsvoorschriften
-   - Bouwhoogte restricties
-❌ MAG NIET ZIJN:
-   - Algemene huisregels zonder technische specs
-   - Marketing materiaal
-   - Prijslijsten voor technische services
-🔍 Zoekwoorden: "Technical Guidelines", "Technische Richtlinien", "Stand Construction Regulations"
+✅ MOET BEVATTEN: Bouwhoogte, elektra specs, vloerbelasting, brandveiligheid, constructie-eisen
+❌ MAG NIET: Algemene huisregels, prijslijsten
+🔍 Zoekwoorden: "Technical Guidelines", "Technische Richtlinien", "Technical Regulations", "Regolamento Tecnico", "Stand Construction"
 
-**4. Build-up & Tear-down Schedule (Schema/Tijdlijn)**
-✅ MOET BEVATTEN:
-   - CONCRETE datums (dag/maand/jaar)
-   - Specifieke tijden (bijv. 07:00-22:00)
-   - Opbouw én afbouw periodes
-❌ MAG NIET ZIJN:
-   - Vage "neem contact op voor data"
-   - Alleen beursdagen zonder opbouw/afbouw
-   - Generieke "X weken voor de beurs" zonder echte data
-🔍 Zoekwoorden: "Set-up and dismantling", "Aufbau und Abbau", "Timeline", "Termine"
+**4. Build-up & Tear-down Schedule (Schema)**
+✅ MOET BEVATTEN: CONCRETE datums (DD-MM-YYYY), tijden (HH:MM), opbouw én afbouw
+❌ MAG NIET: Vage info, alleen beursdagen
+🔍 Zoekwoorden: "Set-up and dismantling", "Aufbau und Abbau", "Montaggio e smontaggio", "Timeline"
 
 **5. Exhibitor Directory (Exposantenlijst)**
-✅ MOET BEVATTEN:
-   - Lijst met meerdere bedrijfsnamen
-   - Bij voorkeur: standnummers, halnummers, of zoekmachine
-❌ MAG NIET ZIJN:
-   - Sponsorlijst of partnerlijst (slechts enkele bedrijven)
-   - Bezoekersinformatie
-   - Één bedrijfsprofiel pagina
-🔍 Vaak op subdomein: exhibitors.beursnaam.de, aussteller.beursnaam.de
+✅ MOET BEVATTEN: Lijst met bedrijfsnamen, bij voorkeur met standnummers
+❌ MAG NIET: Sponsorlijst, één bedrijfsprofiel
+🔍 Vaak op: /exhibitors, /catalogue, /espositori, subdomein exhibitors.xxx.com
 
-=== VALIDATIE PROCES ===
+=== BELANGRIJK: DIEP ZOEKEN ===
 
-Bij het vinden van een document:
-1. OPEN of BEKIJK het document/de pagina
-2. CONTROLEER tegen de criteria hierboven
-3. ALS het NIET voldoet → ZOEK VERDER, accepteer het NIET
-4. ALS het WEL voldoet → Noteer de URL en ga door
+Als je een "Participate" of "For Exhibitors" sectie vindt:
+1. Scroll de HELE pagina af
+2. Klik op ALLE accordion/dropdown items
+3. Zoek naar "Technical regulations" of "Sustainable set-up" subsecties
+4. Check voor kleine PDF/download icons naast tekst
 
-BELANGRIJK: Accepteer NIET te snel! Bij twijfel, zoek door naar een beter alternatief.
+Als je een downloadcenter vindt:
+1. Scroll door ALLE documenten
+2. Let op bestandsnamen - niet alleen titels
+3. "Provisions", "Regulations", "Technical" zijn vaak de juiste documenten
 
 === KRITIEK: GEBRUIK DE PDF LINKS! ===
 
-Na elke actie krijg je een lijst met "📄 PDF LINKS OP DEZE PAGINA".
-GEBRUIK DEZE URLS DIRECT IN JE OUTPUT!
-
-Voorbeeld - als je dit ziet:
-📄 PDF LINKS OP DEZE PAGINA:
-• Geländeplan: https://example.com/content/dam/gelaendeplan.pdf
-• Technical Guidelines: https://example.com/documents/guidelines.pdf
-
-Dan gebruik je EXACT die URLs in je JSON output:
-- floorplan_url: "https://example.com/content/dam/gelaendeplan.pdf"
-- rules_url: "https://example.com/documents/guidelines.pdf"
-
-Je hoeft NIET op de PDF te klikken. De URL die je ziet IS de directe download URL.
-
-=== STRATEGIE ===
-
-1. **Navigeer naar Exhibitor sectie**
-   - Menu: "For Exhibitors", "Exhibitors", "Ausstellen", "Planning & Preparation"
-
-2. **Vind Download Center / Service Documentation**
-   - Zoek: "Downloads", "Documents", "Service Documentation", "Downloadcenter"
-   - BEKIJK de PDF links die verschijnen!
-   - ⚠️ VALIDEER elk document tegen de criteria!
-
-3. **Vind Schedule pagina**
-   - Zoek: "Set-up and dismantling", "Aufbau und Abbau", "Timeline"
-   - Noteer ALLE datums met tijden
-   - ⚠️ Alleen CONCRETE datums accepteren, geen vage info!
-
-4. **Vind Exhibitor Directory**
-   - Zoek: "Exhibitor Search", "Find Exhibitors", "Ausstellerverzeichnis"
-   - CHECK ook subdomeinen: exhibitors.[beursnaam].de of online.[beursnaam].com
-   - Gebruik goto_url om subdomeinen te bezoeken!
-   - ⚠️ Moet echte bedrijvenlijst zijn, niet sponsorpagina!
-
-5. **VALIDEER voordat je accepteert**
-   - Open/bekijk elk gevonden document
-   - Check: voldoet het aan ALLE criteria?
-   - Bij twijfel: ZOEK DOOR naar beter alternatief!
-
-6. **Verzamel je resultaten**
-   - Gebruik de PDF URLs die je hebt gezien in de link lijsten
-   - Geef je JSON output met validation_notes per document
+Na elke actie krijg je "📄 PDF LINKS OP DEZE PAGINA".
+GEBRUIK DEZE URLS DIRECT - je hoeft NIET te klikken om ze te downloaden.
 
 === TOOLS ===
 
-Je hebt twee tools:
-1. **computer** - voor screenshots en interactie (klikken, scrollen, typen)
-2. **goto_url** - om DIRECT naar een URL te navigeren (gebruik voor subdomeinen en PDF links)
+1. **computer** - voor screenshots en interactie
+2. **goto_url** - DIRECT naar URL navigeren (gebruik voor subdomeinen, PDF links, en alternatieve paden)
 
 === SCHEDULE FORMAT ===
 
@@ -208,7 +164,7 @@ class ClaudeAgent:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        max_iterations: int = 30,
+        max_iterations: int = 40,
         debug: bool = False,
         on_status: Optional[Callable[[str], None]] = None
     ):
@@ -285,6 +241,28 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
             while not done and iteration < self.max_iterations:
                 iteration += 1
                 self._log(f"Iteration {iteration}/{self.max_iterations}")
+
+                # Mid-point check - encourage deeper exploration
+                if iteration == 20:
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": """📊 TUSSENTIJDSE CHECK (iteratie 20/40):
+
+Heb je AL deze secties al bezocht?
+1. ✓ Exhibitor/For Exhibitors sectie
+2. ✓ Downloads/Documents/Service Documentation
+3. ✓ Technical regulations / Stand design provisions
+4. ✓ Participate / How to exhibit sectie
+5. ✓ Subdomeinen (exhibitors.xxx.com)
+
+Als je NOG NIET alle documenten hebt gevonden:
+- Zoek naar "Technical regulations" of "Provisions for stand design" links
+- Klik op ALLE accordion/dropdown items (+ of ▼ icons)
+- Scroll volledig door download pagina's
+- Probeer alternatieve paden: /en/exhibitors, /services, /participate
+
+Je hebt nog 20 acties - gebruik ze om DIEPER te zoeken!"""}],
+                    })
 
                 # Warn agent to wrap up when approaching limit
                 if iteration == self.max_iterations - 5:
@@ -762,7 +740,7 @@ async def run_discovery(
 
     agent = ClaudeAgent(
         api_key=api_key,
-        max_iterations=30,
+        max_iterations=40,
         debug=True,
         on_status=on_status
     )
