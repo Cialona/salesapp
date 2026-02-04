@@ -245,11 +245,26 @@ class ClaudeAgent:
             urls_to_scan.append(domain)
 
         # Add common document page patterns (generic)
+        # These are paths where technical documents are often found, NOT under fair-specific paths
         generic_paths = [
+            # English
             '/en/exhibitors', '/exhibitors', '/en/participate', '/participate',
             '/en/services', '/services', '/en/downloads', '/downloads',
             '/en/information', '/information', '/en/planning', '/planning',
-            '/for-exhibitors', '/aussteller', '/espositori', '/partecipare',
+            '/for-exhibitors', '/en/for-exhibitors',
+            # Technical document pages (often NOT under fair-specific paths!)
+            '/en/technical-regulations', '/technical-regulations',
+            '/en/sustainable-set-up', '/sustainable-set-up',
+            '/en/technical-guidelines', '/technical-guidelines',
+            '/en/stand-construction', '/stand-construction',
+            '/en/exhibitor-services', '/exhibitor-services',
+            '/en/fiere-e-eventi/esporre',  # Italian fairs often use this
+            # German
+            '/aussteller', '/de/aussteller', '/technik', '/de/technik',
+            '/technische-richtlinien', '/de/technische-richtlinien',
+            # Italian
+            '/espositori', '/it/espositori', '/partecipare', '/it/partecipare',
+            '/regolamento-tecnico', '/it/regolamento-tecnico',
         ]
 
         # Add fair-specific paths (e.g., /en/eurocucina/exhibitors)
@@ -257,6 +272,7 @@ class ClaudeAgent:
             '/exhibitors', '/participate', '/services', '/downloads',
             '/information', '/planning', '/technical', '/regulations',
             '/stand-design', '/documents', '/for-exhibitors',
+            '/technical-regulations', '/sustainable-set-up',  # Added combined paths
         ]
 
         # Add generic paths to base domain
@@ -356,25 +372,60 @@ class ClaudeAgent:
                                 self._log(f"    ⭐ High-value doc: {link.text[:40]}...")
 
                     # Collect document-related pages for second pass (including cross-domain)
-                    for link in relevant_links.get('exhibitor_links', []) + relevant_links.get('download_links', []):
+                    # Check ALL links, not just exhibitor/download links
+                    all_page_links = (
+                        relevant_links.get('exhibitor_links', []) +
+                        relevant_links.get('download_links', []) +
+                        relevant_links.get('high_value_links', []) +
+                        relevant_links.get('all_links', [])[:50]  # Sample of all links
+                    )
+
+                    # Remove duplicates
+                    seen_urls = set()
+                    unique_links = []
+                    for link in all_page_links:
+                        if link.url not in seen_urls:
+                            seen_urls.add(link.url)
+                            unique_links.append(link)
+
+                    for link in unique_links:
                         lower_url = link.url.lower()
+                        lower_text = link.text.lower() if link.text else ''
 
                         # Skip listing pages (exhibitor directories with pagination)
                         if '?pagenumber=' in lower_url or '?anno=' in lower_url or '?page=' in lower_url:
                             continue
 
-                        # Check if this looks like a document page
-                        if any(kw in lower_url for kw in doc_keywords):
-                            if link.url not in results['exhibitor_pages'] and '.pdf' not in lower_url:
+                        # Skip already processed PDFs
+                        if '.pdf' in lower_url:
+                            continue
+
+                        # Check if URL OR TEXT contains document keywords
+                        # This catches links like "Technical regulations" -> /en/technical-regulations
+                        url_has_keyword = any(kw in lower_url for kw in doc_keywords)
+                        text_has_keyword = any(kw in lower_text for kw in doc_keywords)
+
+                        # Also check for specific page patterns that often have documents
+                        is_document_page = any(pattern in lower_url for pattern in [
+                            'technical-regulation', 'sustainable', 'stand-design',
+                            'provision', 'guideline', 'regolamento', 'richtlin',
+                            'exhibitor-service', 'download', 'document',
+                            '/esporre', '/exhibit', '/partecipa',
+                        ])
+
+                        if url_has_keyword or text_has_keyword or is_document_page:
+                            if link.url not in results['exhibitor_pages']:
                                 results['exhibitor_pages'].append(link.url)
 
-                                # Allow cross-domain links to related exhibitor portals
-                                is_related_domain = any(rd in link.url for rd in ['exhibitors.', 'aussteller.', 'espositori.', 'fieramilano.it', '/content/dam/'])
-                                is_same_domain = parsed_base.netloc in link.url
+                                # Allow same domain or related exhibitor portals
+                                is_related_domain = any(rd in link.url for rd in [
+                                    'exhibitors.', 'aussteller.', 'espositori.',
+                                    'fieramilano.it', '/content/dam/', base_netloc
+                                ])
 
-                                if (is_same_domain or is_related_domain) and link.url not in urls_to_scan:
+                                if is_related_domain and link.url not in urls_to_scan:
                                     found_pages_to_scan.append(link.url)
-                                    self._log(f"    🔗 Found document page: {link.url[:60]}...")
+                                    self._log(f"    🔗 Found document page: {link.text[:30] if link.text else link.url[:40]}...")
 
                 except Exception as e:
                     # Silently skip failed URLs
