@@ -7,7 +7,6 @@ import asyncio
 import json
 import re
 import time
-import aiohttp
 from typing import Optional, List, Dict, Any, Callable
 from urllib.parse import urlparse, urljoin
 
@@ -189,10 +188,11 @@ class ClaudeAgent:
 
     async def _pre_scan_website(self, base_url: str) -> Dict[str, Any]:
         """
-        Pre-scan the website by fetching HTML and extracting document links.
-        This runs BEFORE Computer Use to find documents that might be hidden.
+        Pre-scan the website using Playwright to find documents.
+        Uses a real browser with JavaScript execution to find dynamically loaded content.
+        This runs BEFORE the main Computer Use loop to find documents that might be hidden.
         """
-        self._log("🔎 Pre-scanning website for documents...")
+        self._log("🔎 Pre-scanning website with Playwright (JavaScript enabled)...")
 
         results = {
             'pdf_links': [],
@@ -245,7 +245,7 @@ class ClaudeAgent:
         seen = set()
         urls_to_scan = [x for x in urls_to_scan if not (x in seen or seen.add(x))]
 
-        self._log(f"Pre-scan will check {len(urls_to_scan)} URLs")
+        self._log(f"Pre-scan will check {len(urls_to_scan)} URLs with JavaScript execution")
 
         # Keywords that indicate important document links
         doc_keywords = [
@@ -257,105 +257,141 @@ class ClaudeAgent:
 
         found_pages_to_scan = []  # Pages found that we should also scan
 
-        async with aiohttp.ClientSession() as session:
+        # Create a lightweight browser for pre-scanning
+        pre_scan_browser = BrowserController(800, 600)  # Smaller viewport for speed
+
+        try:
+            await pre_scan_browser.launch()
+            self._log("Pre-scan browser launched")
+
             # First pass: scan initial URLs
-            for url in urls_to_scan[:15]:  # Increased limit
+            for url in urls_to_scan[:15]:  # Limit to prevent slowdown
                 try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
-                        if response.status == 200:
-                            html = await response.text()
-                            self._log(f"  ✓ Scanning: {url}")
+                    await pre_scan_browser.goto(url)
+                    await asyncio.sleep(0.5)  # Let JavaScript execute
 
-                            # Extract all links using regex
-                            link_pattern = r'href=["\']([^"\']+)["\']'
-                            links = re.findall(link_pattern, html, re.IGNORECASE)
+                    current_state = await pre_scan_browser.get_state()
+                    self._log(f"  ✓ Scanning: {url}")
 
-                            for link in links:
-                                # Convert relative to absolute
-                                if link.startswith('/'):
-                                    full_url = f"{base_domain}{link}"
-                                elif link.startswith('http'):
-                                    full_url = link
-                                else:
-                                    full_url = urljoin(url, link)
+                    # Get all links (this expands accordions and extracts with JS)
+                    relevant_links = await pre_scan_browser.get_relevant_links()
 
-                                lower_url = full_url.lower()
+                    # Process PDF links
+                    for link in relevant_links.get('pdf_links', []):
+                        if link.url not in [p['url'] for p in results['pdf_links']]:
+                            lower_url = link.url.lower()
+                            lower_text = link.text.lower()
 
-                                # Check for PDFs
-                                if '.pdf' in lower_url or '/sites/default/files/' in lower_url:
-                                    if full_url not in [p['url'] for p in results['pdf_links']]:
-                                        # Determine document type from URL
-                                        doc_type = 'unknown'
-                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.', 'reg_']):
-                                            doc_type = 'technical_guidelines'
-                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'smm_']):
-                                            doc_type = 'exhibitor_manual'
-                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site', 'map']):
-                                            doc_type = 'floorplan'
-                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar']):
-                                            doc_type = 'schedule'
+                            # Determine document type from URL and text
+                            doc_type = 'unknown'
+                            if any(kw in lower_url or kw in lower_text for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.', 'reg_', 'tecnic']):
+                                doc_type = 'technical_guidelines'
+                            elif any(kw in lower_url or kw in lower_text for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'smm_', 'manual', 'handbook', 'handbuch']):
+                                doc_type = 'exhibitor_manual'
+                            elif any(kw in lower_url or kw in lower_text for kw in ['floor', 'plan', 'hall', 'gelaende', 'site', 'map', 'layout']):
+                                doc_type = 'floorplan'
+                            elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar', 'abbau', 'dismant']):
+                                doc_type = 'schedule'
 
-                                        results['pdf_links'].append({
-                                            'url': full_url,
-                                            'type': doc_type,
-                                            'source_page': url
-                                        })
-                                        self._log(f"    📄 Found PDF: {full_url[:80]}...")
+                            results['pdf_links'].append({
+                                'url': link.url,
+                                'text': link.text,
+                                'type': doc_type,
+                                'source_page': url
+                            })
+                            self._log(f"    📄 Found PDF: {link.text[:40] or link.url[:60]}...")
 
-                                # Check for pages that might contain documents
-                                if any(kw in lower_url for kw in doc_keywords):
-                                    if full_url not in results['exhibitor_pages'] and '.pdf' not in lower_url:
-                                        results['exhibitor_pages'].append(full_url)
-                                        # Add to second-pass scan if it's on same domain
-                                        if parsed_base.netloc in full_url and full_url not in urls_to_scan:
-                                            found_pages_to_scan.append(full_url)
+                    # Process high-value document links (expand them!)
+                    for link in relevant_links.get('high_value_links', []):
+                        if link.url not in [p['url'] for p in results['pdf_links']]:
+                            lower_url = link.url.lower()
+                            lower_text = link.text.lower()
+
+                            if '.pdf' in lower_url or 'download' in lower_url or '/files/' in lower_url:
+                                doc_type = 'unknown'
+                                if any(kw in lower_url or kw in lower_text for kw in ['technical', 'regulation', 'richtlin', 'regolamento']):
+                                    doc_type = 'technical_guidelines'
+                                elif any(kw in lower_url or kw in lower_text for kw in ['provision', 'stand', 'design', 'manual', 'handbook']):
+                                    doc_type = 'exhibitor_manual'
+
+                                results['pdf_links'].append({
+                                    'url': link.url,
+                                    'text': link.text,
+                                    'type': doc_type,
+                                    'source_page': url
+                                })
+                                self._log(f"    ⭐ High-value doc: {link.text[:40]}...")
+
+                    # Collect exhibitor-related pages for second pass
+                    for link in relevant_links.get('exhibitor_links', []):
+                        lower_url = link.url.lower()
+                        if any(kw in lower_url for kw in doc_keywords):
+                            if link.url not in results['exhibitor_pages'] and '.pdf' not in lower_url:
+                                results['exhibitor_pages'].append(link.url)
+                                if parsed_base.netloc in link.url and link.url not in urls_to_scan:
+                                    found_pages_to_scan.append(link.url)
 
                 except Exception as e:
                     # Silently skip failed URLs
                     continue
 
-            # Second pass: scan pages found in first pass (might contain hidden PDFs)
+            # Second pass: scan discovered pages (might contain hidden PDFs)
             for url in found_pages_to_scan[:10]:
                 try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
-                        if response.status == 200:
-                            html = await response.text()
-                            self._log(f"  ✓ Second-pass scan: {url}")
+                    if url in [u for u in urls_to_scan[:15]]:  # Skip already scanned
+                        continue
 
-                            link_pattern = r'href=["\']([^"\']+)["\']'
-                            links = re.findall(link_pattern, html, re.IGNORECASE)
+                    await pre_scan_browser.goto(url)
+                    await asyncio.sleep(0.5)
 
-                            for link in links:
-                                if link.startswith('/'):
-                                    full_url = f"{base_domain}{link}"
-                                elif link.startswith('http'):
-                                    full_url = link
-                                else:
-                                    full_url = urljoin(url, link)
+                    self._log(f"  ✓ Second-pass scan: {url}")
 
-                                lower_url = full_url.lower()
+                    relevant_links = await pre_scan_browser.get_relevant_links()
 
-                                if '.pdf' in lower_url or '/sites/default/files/' in lower_url:
-                                    if full_url not in [p['url'] for p in results['pdf_links']]:
-                                        doc_type = 'unknown'
-                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.', 'reg_']):
-                                            doc_type = 'technical_guidelines'
-                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'smm_']):
-                                            doc_type = 'exhibitor_manual'
-                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site', 'map']):
-                                            doc_type = 'floorplan'
-                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar']):
-                                            doc_type = 'schedule'
+                    for link in relevant_links.get('pdf_links', []):
+                        if link.url not in [p['url'] for p in results['pdf_links']]:
+                            lower_url = link.url.lower()
+                            lower_text = link.text.lower()
 
-                                        results['pdf_links'].append({
-                                            'url': full_url,
-                                            'type': doc_type,
-                                            'source_page': url
-                                        })
-                                        self._log(f"    📄 Found PDF (2nd pass): {full_url[:80]}...")
+                            doc_type = 'unknown'
+                            if any(kw in lower_url or kw in lower_text for kw in ['technical', 'regulation', 'richtlin', 'regolamento']):
+                                doc_type = 'technical_guidelines'
+                            elif any(kw in lower_url or kw in lower_text for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'manual', 'handbook']):
+                                doc_type = 'exhibitor_manual'
+                            elif any(kw in lower_url or kw in lower_text for kw in ['floor', 'plan', 'hall', 'gelaende']):
+                                doc_type = 'floorplan'
+                            elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio']):
+                                doc_type = 'schedule'
+
+                            results['pdf_links'].append({
+                                'url': link.url,
+                                'text': link.text,
+                                'type': doc_type,
+                                'source_page': url
+                            })
+                            self._log(f"    📄 Found PDF (2nd pass): {link.text[:40] or link.url[:60]}...")
+
+                    # Also check high-value links in second pass
+                    for link in relevant_links.get('high_value_links', []):
+                        if link.url not in [p['url'] for p in results['pdf_links']]:
+                            lower_url = link.url.lower()
+                            if '.pdf' in lower_url or 'download' in lower_url or '/files/' in lower_url:
+                                results['pdf_links'].append({
+                                    'url': link.url,
+                                    'text': link.text,
+                                    'type': 'unknown',
+                                    'source_page': url
+                                })
+                                self._log(f"    ⭐ High-value (2nd): {link.text[:40]}...")
 
                 except Exception:
                     continue
+
+        except Exception as e:
+            self._log(f"Pre-scan error: {e}")
+        finally:
+            await pre_scan_browser.close()
+            self._log("Pre-scan browser closed")
 
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
