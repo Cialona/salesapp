@@ -7,8 +7,9 @@ import asyncio
 import json
 import re
 import time
+import aiohttp
 from typing import Optional, List, Dict, Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import anthropic
 
@@ -103,6 +104,9 @@ GEBRUIK DEZE URLS DIRECT - je hoeft NIET te klikken om ze te downloaden.
 
 1. **computer** - voor screenshots en interactie
 2. **goto_url** - DIRECT naar URL navigeren (gebruik voor subdomeinen, PDF links, en alternatieve paden)
+3. **deep_scan** - GEBRUIK DIT! Scant de hele pagina, opent alle accordions/dropdowns, en toont ALLE PDF/document links. Gebruik dit op elke belangrijke pagina (Participate, For Exhibitors, Downloads, etc.)
+
+⚠️ BELANGRIJK: Gebruik deep_scan op elke pagina waar je documenten verwacht! Het vindt verborgen links die je niet op de screenshot ziet.
 
 === SCHEDULE FORMAT ===
 
@@ -183,6 +187,99 @@ class ClaudeAgent:
             print(message)
         self.on_status(message)
 
+    async def _pre_scan_website(self, base_url: str) -> Dict[str, Any]:
+        """
+        Pre-scan the website by fetching HTML and extracting document links.
+        This runs BEFORE Computer Use to find documents that might be hidden.
+        """
+        self._log("🔎 Pre-scanning website for documents...")
+
+        results = {
+            'pdf_links': [],
+            'document_pages': [],
+            'exhibitor_pages': [],
+            'all_links': []
+        }
+
+        parsed_base = urlparse(base_url)
+        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
+        # URLs to try scanning
+        urls_to_scan = [base_url]
+
+        # Add common document page patterns
+        common_paths = [
+            '/en/exhibitors', '/exhibitors', '/en/participate', '/participate',
+            '/en/services', '/services', '/en/downloads', '/downloads',
+            '/en/information', '/information', '/en/planning', '/planning',
+            '/for-exhibitors', '/aussteller', '/espositori', '/partecipare',
+        ]
+
+        for path in common_paths:
+            urls_to_scan.append(f"{base_domain}{path}")
+
+        # Keywords that indicate important document links
+        doc_keywords = [
+            'technical', 'regulation', 'provision', 'guideline', 'manual',
+            'handbook', 'richtlin', 'regolamento', 'standbau', 'construction',
+            'setup', 'dismant', 'aufbau', 'abbau', 'montaggio', 'allestimento',
+            'floor', 'plan', 'hall', 'gelaende', 'exhibitor', 'aussteller',
+        ]
+
+        async with aiohttp.ClientSession() as session:
+            for url in urls_to_scan[:10]:  # Limit to 10 URLs to avoid slowdown
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
+                        if response.status == 200:
+                            html = await response.text()
+
+                            # Extract all links using regex
+                            link_pattern = r'href=["\']([^"\']+)["\']'
+                            links = re.findall(link_pattern, html, re.IGNORECASE)
+
+                            for link in links:
+                                # Convert relative to absolute
+                                if link.startswith('/'):
+                                    full_url = f"{base_domain}{link}"
+                                elif link.startswith('http'):
+                                    full_url = link
+                                else:
+                                    full_url = urljoin(url, link)
+
+                                lower_url = full_url.lower()
+
+                                # Check for PDFs
+                                if '.pdf' in lower_url or '/sites/default/files/' in lower_url:
+                                    if full_url not in [p['url'] for p in results['pdf_links']]:
+                                        # Determine document type from URL
+                                        doc_type = 'unknown'
+                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.']):
+                                            doc_type = 'technical_guidelines'
+                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento']):
+                                            doc_type = 'exhibitor_manual'
+                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site']):
+                                            doc_type = 'floorplan'
+                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio']):
+                                            doc_type = 'schedule'
+
+                                        results['pdf_links'].append({
+                                            'url': full_url,
+                                            'type': doc_type,
+                                            'source_page': url
+                                        })
+
+                                # Check for exhibitor-related pages
+                                if any(kw in lower_url for kw in doc_keywords):
+                                    if full_url not in results['exhibitor_pages'] and not '.pdf' in lower_url:
+                                        results['exhibitor_pages'].append(full_url)
+
+                except Exception as e:
+                    self._log(f"Pre-scan error for {url}: {e}")
+                    continue
+
+        self._log(f"Pre-scan found {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
+        return results
+
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
         output = create_empty_output(input_data.fair_name)
@@ -192,22 +289,65 @@ class ClaudeAgent:
         start_time = time.time()
 
         try:
+            # PHASE 1: Pre-scan website for documents (HTML-based, fast)
+            start_url = input_data.known_url or f"https://www.google.com/search?q={input_data.fair_name}+official+website"
+
+            pre_scan_results = None
+            pre_scan_info = ""
+
+            if input_data.known_url:
+                pre_scan_results = await self._pre_scan_website(input_data.known_url)
+
+                # Format pre-scan results for the agent
+                if pre_scan_results['pdf_links']:
+                    pre_scan_info += "\n\n🎯 PRE-SCAN RESULTATEN - DOCUMENTEN GEVONDEN VOORAF:\n"
+                    pre_scan_info += "=" * 60 + "\n"
+
+                    # Group by type
+                    by_type = {}
+                    for pdf in pre_scan_results['pdf_links']:
+                        doc_type = pdf['type']
+                        if doc_type not in by_type:
+                            by_type[doc_type] = []
+                        by_type[doc_type].append(pdf)
+
+                    type_labels = {
+                        'technical_guidelines': '📋 TECHNISCHE RICHTLIJNEN',
+                        'exhibitor_manual': '📖 EXPOSANTEN HANDLEIDING',
+                        'floorplan': '🗺️ PLATTEGROND',
+                        'schedule': '📅 SCHEMA',
+                        'unknown': '📄 OVERIGE DOCUMENTEN'
+                    }
+
+                    for doc_type, pdfs in by_type.items():
+                        pre_scan_info += f"\n{type_labels.get(doc_type, doc_type)}:\n"
+                        for pdf in pdfs[:5]:  # Limit per category
+                            pre_scan_info += f"  ⭐ {pdf['url']}\n"
+
+                    pre_scan_info += "\n" + "=" * 60
+                    pre_scan_info += "\n💡 GEBRUIK goto_url om deze documenten direct te openen en valideren!\n"
+
+                if pre_scan_results['exhibitor_pages']:
+                    pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
+                    for page in pre_scan_results['exhibitor_pages'][:10]:
+                        pre_scan_info += f"  • {page}\n"
+
+            # PHASE 2: Launch browser for visual verification
             await self.browser.launch()
             self._log("Browser launched")
 
-            # Navigate to starting URL
-            start_url = input_data.known_url or f"https://www.google.com/search?q={input_data.fair_name}+official+website"
             await self.browser.goto(start_url)
             self._log(f"Navigated to: {start_url}")
 
-            # Build initial message
+            # Build initial message with pre-scan results
             user_message = f"""
 Vind informatie voor de beurs: {input_data.fair_name}
 {f'Stad: {input_data.city}' if input_data.city else ''}
 {f'Land: {input_data.country}' if input_data.country else ''}
 {f'Start URL: {input_data.known_url}' if input_data.known_url else ''}
+{pre_scan_info}
 
-Navigeer door de website en vind alle gevraagde documenten en informatie.
+{'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] else 'Navigeer door de website en vind alle gevraagde documenten.'}
 """
 
             # Get initial screenshot
@@ -304,6 +444,15 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                                 "required": ["url"],
                             },
                         },
+                        {
+                            "name": "deep_scan",
+                            "description": "Perform a deep scan of the current page to find ALL document links. This expands all accordions, dropdowns, and hidden sections, then extracts every PDF and document link. Use this when you suspect there are hidden documents on the page.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                            },
+                        },
                     ],
                     messages=messages,
                 )
@@ -351,6 +500,14 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                     elif tool_use.name == "goto_url":
                         url = tool_use.input.get("url", "")
                         result = await self._execute_goto_url(url)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": result,
+                        })
+
+                    elif tool_use.name == "deep_scan":
+                        result = await self._execute_deep_scan()
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
@@ -423,6 +580,12 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             relevant_links = await self.browser.get_relevant_links()
             link_info = ""
 
+            # Show high-value links first (technical regulations, provisions, etc.)
+            if relevant_links.get('high_value_links'):
+                link_info += "\n\n⭐ BELANGRIJKE DOCUMENTEN GEVONDEN:\n"
+                for link in relevant_links['high_value_links'][:10]:
+                    link_info += f"• ⭐ {link.text or 'Document'}: {link.url}\n"
+
             if relevant_links['pdf_links']:
                 link_info += "\n\n📄 PDF LINKS OP DEZE PAGINA:\n"
                 for link in relevant_links['pdf_links'][:20]:
@@ -444,6 +607,52 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             return link_info
         except:
             return ""
+
+    async def _execute_deep_scan(self) -> List[Dict[str, Any]]:
+        """Execute deep scan to find all document links on the current page."""
+        self._log("Performing deep scan for documents...")
+
+        try:
+            # Get all links (accordion expansion happens automatically)
+            relevant_links = await self.browser.get_relevant_links()
+            state = await self.browser.get_state()
+
+            result_text = f"🔍 DEEP SCAN RESULTATEN voor {state.url}\n"
+            result_text += "=" * 60 + "\n\n"
+
+            # High-value documents first
+            if relevant_links.get('high_value_links'):
+                result_text += "⭐⭐⭐ BELANGRIJKE DOCUMENTEN (technical/regulations/provisions):\n"
+                for link in relevant_links['high_value_links']:
+                    result_text += f"  ⭐ {link.text[:80]}\n     URL: {link.url}\n\n"
+            else:
+                result_text += "⚠️ Geen high-value documenten gevonden op deze pagina.\n\n"
+
+            # All PDFs
+            if relevant_links['pdf_links']:
+                result_text += f"\n📄 ALLE PDF LINKS ({len(relevant_links['pdf_links'])} gevonden):\n"
+                for link in relevant_links['pdf_links'][:30]:
+                    result_text += f"  • {link.text[:60] or 'PDF'}\n    URL: {link.url}\n"
+            else:
+                result_text += "\n📄 Geen PDF links gevonden.\n"
+
+            # CMS/Download links
+            if relevant_links['download_links']:
+                result_text += f"\n📥 DOWNLOAD/CMS LINKS ({len(relevant_links['download_links'])} gevonden):\n"
+                seen_urls = set()
+                for link in relevant_links['download_links'][:20]:
+                    if link.url not in seen_urls:
+                        seen_urls.add(link.url)
+                        result_text += f"  • {link.text[:60]}\n    URL: {link.url}\n"
+
+            result_text += "\n" + "=" * 60
+            result_text += "\n💡 TIP: Gebruik goto_url om direct naar een PDF te navigeren!"
+
+            return [{"type": "text", "text": result_text}]
+
+        except Exception as e:
+            self._log(f"Deep scan error: {e}")
+            return [{"type": "text", "text": f"Deep scan error: {e}"}]
 
     async def _execute_goto_url(self, url: str) -> List[Dict[str, Any]]:
         """Execute goto_url tool."""

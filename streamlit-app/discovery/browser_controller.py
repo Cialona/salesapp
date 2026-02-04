@@ -265,6 +265,9 @@ class BrowserController:
         if not self._page:
             raise RuntimeError("Browser not launched")
 
+        # First, expand all accordions/details/dropdowns to reveal hidden content
+        await self._expand_all_hidden_sections()
+
         # Extract links using JavaScript
         links = await self._page.eval_on_selector_all(
             'a[href]',
@@ -300,6 +303,7 @@ class BrowserController:
                 '.pdf?' in lower_url or
                 '/document/' in lower_url or
                 '/content/dam/' in lower_url or
+                '/sites/default/files/' in lower_url or  # Drupal CMS
                 'cloudfront.net' in lower_url or
                 'pdf' in lower_text or
                 'download' in lower_text
@@ -312,6 +316,71 @@ class BrowserController:
             ))
 
         return result
+
+    async def _expand_all_hidden_sections(self) -> None:
+        """Expand all accordion, details, and dropdown elements to reveal hidden content."""
+        if not self._page:
+            return
+
+        try:
+            # JavaScript to expand various types of hidden content
+            await self._page.evaluate('''() => {
+                // 1. Expand all <details> elements
+                document.querySelectorAll('details').forEach(d => d.open = true);
+
+                // 2. Click on accordion triggers (common patterns)
+                const accordionSelectors = [
+                    '[data-toggle="collapse"]',
+                    '[data-bs-toggle="collapse"]',
+                    '.accordion-button:not(.collapsed)',
+                    '.accordion-trigger',
+                    '.collapse-trigger',
+                    '[aria-expanded="false"]',
+                    '.expandable:not(.expanded)',
+                    '.collapsible:not(.open)',
+                    'button[class*="accordion"]',
+                    'div[class*="accordion"] > button',
+                    'div[class*="accordion"] > div > button',
+                    '.faq-question',
+                    '.toggle-content',
+                    '[class*="expand"]',
+                    '[class*="dropdown"]:not(.open)',
+                ];
+
+                accordionSelectors.forEach(selector => {
+                    try {
+                        document.querySelectorAll(selector).forEach(el => {
+                            if (el.getAttribute('aria-expanded') === 'false') {
+                                el.click();
+                            }
+                        });
+                    } catch(e) {}
+                });
+
+                // 3. Set aria-expanded to true
+                document.querySelectorAll('[aria-expanded="false"]').forEach(el => {
+                    el.setAttribute('aria-expanded', 'true');
+                    el.click();
+                });
+
+                // 4. Show hidden collapse elements
+                document.querySelectorAll('.collapse:not(.show)').forEach(el => {
+                    el.classList.add('show');
+                });
+
+                // 5. Expand Material UI / React accordions
+                document.querySelectorAll('[class*="MuiAccordion"]:not([class*="expanded"])').forEach(el => {
+                    const button = el.querySelector('[class*="MuiAccordionSummary"]');
+                    if (button) button.click();
+                });
+            }''')
+
+            # Wait for content to load
+            await self._page.wait_for_timeout(500)
+
+        except Exception as e:
+            # Silently continue if expansion fails - it's optional
+            print(f"[DEBUG] Accordion expansion error (non-fatal): {e}")
 
     async def get_relevant_links(self) -> Dict[str, List[LinkInfo]]:
         """Get relevant links for trade fair research."""
@@ -356,9 +425,21 @@ class BrowserController:
             if any(kw in l.url.lower() or kw in l.text.lower() for kw in exhibitor_keywords)
         ]
 
+        # Identify high-value document links (likely technical docs)
+        high_value_keywords = [
+            'technical', 'regulation', 'provision', 'richtlin', 'regolamento',
+            'construction', 'standbau', 'allestimento', 'setup', 'dismant',
+            'montaggio', 'smontaggio', 'aufbau', 'abbau'
+        ]
+        high_value_links = [
+            l for l in all_links
+            if any(kw in l.url.lower() or kw in l.text.lower() for kw in high_value_keywords)
+        ]
+
         return {
             'pdf_links': pdf_links,
             'download_links': download_links,
             'exhibitor_links': exhibitor_links,
+            'high_value_links': high_value_links,
             'all_links': all_links
         }
