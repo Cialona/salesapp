@@ -261,12 +261,23 @@ export class BrowserController {
         fullUrl = new URL(link.href, baseUrl).href;
       }
 
+      const lowerUrl = fullUrl.toLowerCase();
+      const lowerText = link.text.toLowerCase();
+
+      // Detect PDF links more comprehensively
+      const isPdf = lowerUrl.endsWith('.pdf') ||
+                    lowerUrl.includes('/pdf/') ||
+                    lowerUrl.includes('.pdf?') ||
+                    lowerUrl.includes('/document/') ||
+                    lowerUrl.includes('/content/dam/') ||
+                    lowerUrl.includes('cloudfront.net') ||
+                    lowerText.includes('pdf') ||
+                    lowerText.includes('download');
+
       return {
         url: fullUrl,
         text: link.text.slice(0, 100), // Limit text length
-        isPdf: fullUrl.toLowerCase().endsWith('.pdf') ||
-               fullUrl.toLowerCase().includes('/pdf/') ||
-               link.text.toLowerCase().includes('pdf'),
+        isPdf,
       };
     });
   }
@@ -282,13 +293,21 @@ export class BrowserController {
 
     const pdfLinks = allLinks.filter(l => l.isPdf);
 
-    const downloadKeywords = ['download', 'document', 'pdf', 'file', 'media', 'asset'];
+    const downloadKeywords = ['download', 'document', 'pdf', 'file', 'media', 'asset', 'content/dam', 'cloudfront'];
     const downloadLinks = allLinks.filter(l =>
       downloadKeywords.some(kw => l.url.toLowerCase().includes(kw) || l.text.toLowerCase().includes(kw))
     );
 
-    const exhibitorKeywords = ['exhibitor', 'aussteller', 'manual', 'handbook', 'guideline',
-      'richtlinie', 'technical', 'floor', 'plan', 'hall', 'schedule', 'timeline', 'directory'];
+    const exhibitorKeywords = [
+      // English
+      'exhibitor', 'manual', 'handbook', 'guideline', 'technical', 'floor', 'plan',
+      'hall', 'schedule', 'timeline', 'directory', 'service', 'documentation',
+      'set-up', 'dismantl', 'build-up', 'tear-down', 'construction', 'regulation',
+      // German
+      'aussteller', 'richtlinie', 'handbuch', 'leitfaden', 'technisch', 'gelände',
+      'hallen', 'zeitplan', 'aufbau', 'abbau', 'standbau', 'verzeichnis',
+      'verkehr', 'vorschrift', 'termine',
+    ];
     const exhibitorLinks = allLinks.filter(l =>
       exhibitorKeywords.some(kw => l.url.toLowerCase().includes(kw) || l.text.toLowerCase().includes(kw))
     );

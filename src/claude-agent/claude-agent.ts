@@ -39,93 +39,93 @@ const SYSTEM_PROMPT = `Je bent een expert onderzoeksagent die exhibitor document
 Vind ALLE documenten en informatie die standbouwers nodig hebben:
 
 1. **Floor Plan / Hall Plan** - Plattegrond van de beurshallen (PDF)
+   - Zoekwoorden: "Geländeplan", "Hallenplan", "Floor plan", "Site plan", "Hall overview"
 2. **Exhibitor Manual / Handbook** - Handleiding voor exposanten (PDF)
-   - Ook: "Service Documentation", "Exhibitor Guide", "Ausstellerhandbuch"
+   - Zoekwoorden: "Service Documentation", "Exhibitor Guide", "Ausstellerhandbuch", "Verkehrsleitfaden"
 3. **Technical Guidelines / Rules** - Technische voorschriften voor standbouw (PDF)
-   - Vaak een apart document van de beursorganisator (Messe Frankfurt, Messe München, etc.)
+   - Zoekwoorden: "Technical Guidelines", "Technische Richtlinien", "Stand Construction Regulations"
 4. **Build-up & Tear-down Schedule** - ALLE opbouw en afbouw datums met exacte tijden
 5. **Exhibitor Directory** - Lijst/zoekmachine voor exposanten
+   - Vaak op subdomein: exhibitors.beursnaam.de, aussteller.beursnaam.de
 
-=== STRATEGIE (VOLG EXACT!) ===
+=== KRITIEK: GEBRUIK DE PDF LINKS! ===
 
-STAP 1: Navigeer naar de Exhibitor/Aussteller sectie
-- Zoek in menu: "For Exhibitors", "Exhibitors", "Ausstellen", "Planning & Preparation"
-- Klik door naar subsecties
+Na elke actie krijg je een lijst met "📄 PDF LINKS OP DEZE PAGINA".
+GEBRUIK DEZE URLS DIRECT IN JE OUTPUT!
 
-STAP 2: Vind het Download Center
-- Zoek: "Downloads", "Documents", "Service Documentation", "Downloadcenter"
-- Dit is waar de meeste PDFs staan
+Voorbeeld - als je dit ziet:
+📄 PDF LINKS OP DEZE PAGINA:
+• Geländeplan: https://example.com/content/dam/gelaendeplan.pdf
+• Technical Guidelines: https://example.com/documents/guidelines.pdf
 
-STAP 3: Vind Set-up/Tear-down informatie
-- Zoek specifiek naar: "Set-up and dismantling", "Aufbau und Abbau", "Build-up"
-- Hier staan de exacte datums en tijden
-- Noteer ALLE datums (advanced set-up, regular set-up, dismantling)
+Dan gebruik je EXACT die URLs in je JSON output:
+- floorplan_url: "https://example.com/content/dam/gelaendeplan.pdf"
+- rules_url: "https://example.com/documents/guidelines.pdf"
 
-STAP 4: Vind de PDF URLs
-- BELANGRIJK: Hover over links om de echte URL te zien
-- PDF URLs bevatten vaak: /content/dam/, /media/, /asset/, cloudfront.net, /documents/
-- Noteer de VOLLEDIGE URL inclusief .pdf extensie
+Je hoeft NIET op de PDF te klikken. De URL die je ziet IS de directe download URL.
 
-STAP 5: Check gerelateerde sites
-- Messe Frankfurt: check ook andere subdomeinen voor Technical Guidelines
-- De Technical Guidelines zijn vaak een algemeen document van de beursorganisator
+=== STRATEGIE ===
 
-STAP 6: Vind de Exhibitor Directory
-- Zoek: "Exhibitor Search", "Find Exhibitors", "Exhibitor List"
-- Vaak een apart subdomein: exhibitors.beursnaam.de of online.beursnaam.com
+1. **Navigeer naar Exhibitor sectie**
+   - Menu: "For Exhibitors", "Exhibitors", "Ausstellen", "Planning & Preparation"
 
-=== PDF URL HERKENNING ===
+2. **Vind Download Center / Service Documentation**
+   - Zoek: "Downloads", "Documents", "Service Documentation", "Downloadcenter"
+   - BEKIJK de PDF links die verschijnen!
 
-Echte PDF URLs zien er zo uit:
-✅ https://ambiente.messefrankfurt.com/content/dam/.../document.pdf
-✅ https://d2n1n6byqxibyi.cloudfront.net/asset/.../document.pdf
-✅ https://messe-berlinprod-media.e-spirit.cloud/.../document.pdf
+3. **Vind Schedule pagina**
+   - Zoek: "Set-up and dismantling", "Aufbau und Abbau", "Timeline"
+   - Noteer ALLE datums met tijden
 
-NIET zo:
-❌ "Download PDF" (dit is een linktekst, geen URL)
-❌ "document.pdf (500 KB)" (dit bevat extra tekst)
+4. **Vind Exhibitor Directory**
+   - Zoek: "Exhibitor Search", "Find Exhibitors", "Ausstellerverzeichnis"
+   - CHECK ook subdomeinen: exhibitors.[beursnaam].de of online.[beursnaam].com
+   - Gebruik goto_url om subdomeinen te bezoeken!
+
+5. **Verzamel je resultaten**
+   - Gebruik de PDF URLs die je hebt gezien in de link lijsten
+   - Geef je JSON output
+
+=== TOOLS ===
+
+Je hebt twee tools:
+1. **computer** - voor screenshots en interactie (klikken, scrollen, typen)
+2. **goto_url** - om DIRECT naar een URL te navigeren (gebruik voor subdomeinen en PDF links)
 
 === SCHEDULE FORMAT ===
 
 Voor build-up en tear-down, geef ALLE datums:
-- Advanced set-up (vroege opbouw, vaak tegen betaling)
+- Advanced set-up (vroege opbouw)
 - Regular set-up (normale opbouw)
 - Dismantling/Tear-down (afbouw)
 
-Inclusief:
-- Exacte datum (YYYY-MM-DD)
-- Tijden (HH:MM-HH:MM)
-- Beschrijving (wat mag wanneer)
+Met: datum (YYYY-MM-DD), tijden (HH:MM-HH:MM), beschrijving
 
 === OUTPUT FORMAT ===
 
-Geef je resultaten als JSON:
+Geef je resultaten als JSON. BELANGRIJK: Gebruik de EXACTE URLs die je hebt gezien!
+
 \`\`\`json
 {
-  "floorplan_url": "https://volledig-pad-naar-bestand.pdf",
-  "exhibitor_manual_url": "https://volledig-pad-naar-bestand.pdf",
-  "rules_url": "https://volledig-pad-naar-bestand.pdf",
-  "exhibitor_directory_url": "https://url-naar-exposantenlijst",
+  "floorplan_url": "https://exacte-url-die-je-zag.pdf",
+  "exhibitor_manual_url": "https://exacte-url-die-je-zag.pdf",
+  "rules_url": "https://exacte-url-die-je-zag.pdf",
+  "exhibitor_directory_url": "https://exhibitors.beursnaam.de",
   "downloads_page_url": "https://url-naar-downloadcenter",
   "schedule": {
     "build_up": [
-      {"date": "2026-01-29", "time": "07:00-24:00", "description": "Advanced set-up (optioneel, €550/dag)"},
-      {"date": "2026-01-30", "time": "07:00-24:00", "description": "Advanced set-up"},
-      {"date": "2026-01-31", "time": "07:00-24:00", "description": "Regular set-up begint"},
-      {"date": "2026-02-01", "time": "07:00-24:00", "description": "Regular set-up"}
+      {"date": "2026-01-29", "time": "07:00-24:00", "description": "Advanced set-up"},
+      {"date": "2026-01-31", "time": "07:00-24:00", "description": "Regular set-up"}
     ],
     "tear_down": [
-      {"date": "2026-02-10", "time": "17:00-20:00", "description": "Afbouw start, alleen binnen stands"},
-      {"date": "2026-02-10", "time": "20:30-24:00", "description": "Voertuigen toegestaan"},
-      {"date": "2026-02-11", "time": "07:00-21:00", "description": "Doorlopende afbouw"}
+      {"date": "2026-02-10", "time": "17:00-24:00", "description": "Afbouw"}
     ]
   },
-  "notes": "Gedetailleerde beschrijving van je zoekpad en wat je vond"
+  "notes": "Beschrijving van je zoekpad"
 }
 \`\`\`
 
-Gebruik null ALLEEN als je het echt niet kunt vinden na grondig zoeken.
-Begin nu met navigeren!`;
+Gebruik null ALLEEN als je het echt niet kunt vinden.`;
 
 export interface ClaudeAgentOptions {
   apiKey?: string;
@@ -230,6 +230,21 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
               display_height_px: screenshot.height,
               display_number: 1,
             } as Anthropic.Beta.Messages.BetaToolComputerUse20250124,
+            // Custom goto_url tool for direct navigation
+            {
+              name: 'goto_url',
+              description: 'Navigate directly to a URL. Use this to visit PDF links you see in the extracted links, or to check exhibitor directory subdomains like exhibitors.bauma.de',
+              input_schema: {
+                type: 'object' as const,
+                properties: {
+                  url: {
+                    type: 'string',
+                    description: 'The full URL to navigate to',
+                  },
+                },
+                required: ['url'],
+              },
+            },
           ],
           messages,
         });
@@ -266,31 +281,8 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
           if (toolUse.name === 'computer') {
             const result = await this.executeComputerAction(toolUse.input as Record<string, unknown>);
 
-            // After navigation actions, extract and include relevant links
-            // This gives Claude the same capabilities as ChatGPT's browsing tool
-            let linkInfo = '';
-            const action = (toolUse.input as Record<string, unknown>)['action'] as string;
-            if (['left_click', 'key', 'type'].includes(action)) {
-              try {
-                const relevantLinks = await this.browser.getRelevantLinks();
-
-                if (relevantLinks.pdfLinks.length > 0) {
-                  linkInfo += '\n\n📄 PDF LINKS OP DEZE PAGINA:\n';
-                  for (const link of relevantLinks.pdfLinks.slice(0, 15)) {
-                    linkInfo += `• ${link.text || 'PDF'}: ${link.url}\n`;
-                  }
-                }
-
-                if (relevantLinks.exhibitorLinks.length > 0 && relevantLinks.pdfLinks.length < 5) {
-                  linkInfo += '\n\n🔗 RELEVANTE LINKS:\n';
-                  for (const link of relevantLinks.exhibitorLinks.slice(0, 10)) {
-                    linkInfo += `• ${link.text}: ${link.url}\n`;
-                  }
-                }
-              } catch {
-                // Ignore link extraction errors
-              }
-            }
+            // Extract links after EVERY action (not just clicks)
+            const linkInfo = await this.extractAndFormatLinks();
 
             // Add link info to the result
             const resultWithLinks = linkInfo
@@ -301,6 +293,15 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
               type: 'tool_result',
               tool_use_id: toolUse.id,
               content: resultWithLinks as Anthropic.Beta.Messages.BetaToolResultBlockParam['content'],
+            });
+          } else if (toolUse.name === 'goto_url') {
+            // Handle goto_url tool
+            const input = toolUse.input as { url: string };
+            const result = await this.executeGotoUrl(input.url);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUse.id,
+              content: result as Anthropic.Beta.Messages.BetaToolResultBlockParam['content'],
             });
           }
         }
@@ -353,47 +354,69 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
         // Auto-map downloads to document fields based on filename
         const filename = download.filename.toLowerCase();
         const url = download.originalUrl;
+        const urlLower = url.toLowerCase();
 
-        // Floor plan / Hall plan / Geländeplan
-        if ((filename.includes('gelände') || filename.includes('gelande') ||
-            filename.includes('floor') || filename.includes('hall') ||
-            filename.includes('plan') || filename.includes('map')) &&
-            !filename.includes('richtlin') && !filename.includes('techni')) {
-          if (!output.documents.floorplan_url) {
-            output.documents.floorplan_url = url;
-            output.quality.floorplan = 'strong';
-            output.primary_reasoning.floorplan = `Auto-detected from download: ${download.filename}`;
-          }
+        // Floor plan / Hall plan / Geländeplan / Site plan
+        const isFloorplan = (
+          filename.includes('gelände') || filename.includes('gelande') ||
+          filename.includes('floor') || filename.includes('hall') ||
+          filename.includes('site') || filename.includes('hallen') ||
+          (filename.includes('plan') && !filename.includes('richtlin') && !filename.includes('techni')) ||
+          filename.includes('map') || filename.includes('overview') ||
+          urlLower.includes('gelaende') || urlLower.includes('floorplan') ||
+          urlLower.includes('hallenplan') || urlLower.includes('siteplan')
+        ) && !filename.includes('richtlin') && !filename.includes('techni') && !filename.includes('guideline');
+
+        if (isFloorplan && !output.documents.floorplan_url) {
+          output.documents.floorplan_url = url;
+          output.quality.floorplan = 'strong';
+          output.primary_reasoning.floorplan = `Auto-detected from download: ${download.filename}`;
         }
 
-        // Technical Guidelines / Richtlinien
-        if (filename.includes('richtlin') || filename.includes('guideline') ||
-            filename.includes('techni') || filename.includes('regulation')) {
-          if (!output.documents.rules_url) {
-            output.documents.rules_url = url;
-            output.quality.rules = 'strong';
-            output.primary_reasoning.rules = `Auto-detected from download: ${download.filename}`;
-          }
+        // Technical Guidelines / Richtlinien / Regulations
+        const isRules = (
+          filename.includes('richtlin') || filename.includes('guideline') ||
+          filename.includes('techni') || filename.includes('regulation') ||
+          filename.includes('vorschrift') || filename.includes('regel') ||
+          filename.includes('construction') || filename.includes('standbau') ||
+          urlLower.includes('richtlin') || urlLower.includes('guideline') ||
+          urlLower.includes('technical')
+        );
+
+        if (isRules && !output.documents.rules_url) {
+          output.documents.rules_url = url;
+          output.quality.rules = 'strong';
+          output.primary_reasoning.rules = `Auto-detected from download: ${download.filename}`;
         }
 
-        // Exhibitor Manual / Service Documentation / Verkehrsleitfaden
-        if (filename.includes('manual') || filename.includes('handbook') ||
-            filename.includes('service') || filename.includes('leitfaden') ||
-            filename.includes('aussteller') || filename.includes('exhibitor')) {
-          if (!output.documents.exhibitor_manual_url) {
-            output.documents.exhibitor_manual_url = url;
-            output.quality.exhibitor_manual = 'strong';
-            output.primary_reasoning.exhibitor_manual = `Auto-detected from download: ${download.filename}`;
-          }
+        // Exhibitor Manual / Service Documentation / Verkehrsleitfaden / Handbuch
+        const isManual = (
+          filename.includes('manual') || filename.includes('handbook') ||
+          filename.includes('handbuch') || filename.includes('service') ||
+          filename.includes('leitfaden') || filename.includes('verkehr') ||
+          filename.includes('aussteller') || filename.includes('exhibitor') ||
+          filename.includes('guide') || filename.includes('documentation') ||
+          urlLower.includes('manual') || urlLower.includes('handbook') ||
+          urlLower.includes('service-doc') || urlLower.includes('leitfaden')
+        ) && !isRules; // Don't classify rules as manual
+
+        if (isManual && !output.documents.exhibitor_manual_url) {
+          output.documents.exhibitor_manual_url = url;
+          output.quality.exhibitor_manual = 'strong';
+          output.primary_reasoning.exhibitor_manual = `Auto-detected from download: ${download.filename}`;
         }
 
         // Schedule / Timeline / Zeitplan
-        if (filename.includes('zeitplan') || filename.includes('timeline') ||
-            filename.includes('schedule') || filename.includes('aufbau') ||
-            filename.includes('abbau')) {
-          if (!output.documents.schedule_page_url) {
-            output.documents.schedule_page_url = url;
-          }
+        const isSchedule = (
+          filename.includes('zeitplan') || filename.includes('timeline') ||
+          filename.includes('schedule') || filename.includes('aufbau') ||
+          filename.includes('abbau') || filename.includes('termine') ||
+          filename.includes('dismantl') || filename.includes('set-up') ||
+          urlLower.includes('schedule') || urlLower.includes('timeline')
+        );
+
+        if (isSchedule && !output.documents.schedule_page_url) {
+          output.documents.schedule_page_url = url;
         }
       }
 
@@ -410,6 +433,75 @@ Navigeer door de website en vind alle gevraagde documenten en informatie.
     }
 
     return output;
+  }
+
+  private async extractAndFormatLinks(): Promise<string> {
+    try {
+      const relevantLinks = await this.browser.getRelevantLinks();
+      let linkInfo = '';
+
+      if (relevantLinks.pdfLinks.length > 0) {
+        linkInfo += '\n\n📄 PDF LINKS OP DEZE PAGINA:\n';
+        for (const link of relevantLinks.pdfLinks.slice(0, 20)) {
+          linkInfo += `• ${link.text || 'PDF'}: ${link.url}\n`;
+        }
+      }
+
+      if (relevantLinks.exhibitorLinks.length > 0) {
+        linkInfo += '\n\n🔗 RELEVANTE LINKS:\n';
+        for (const link of relevantLinks.exhibitorLinks.slice(0, 15)) {
+          linkInfo += `• ${link.text}: ${link.url}\n`;
+        }
+      }
+
+      // Also show download links if different from PDFs
+      const downloadOnlyLinks = relevantLinks.downloadLinks.filter(
+        dl => !relevantLinks.pdfLinks.some(pdf => pdf.url === dl.url)
+      );
+      if (downloadOnlyLinks.length > 0) {
+        linkInfo += '\n\n📥 DOWNLOAD LINKS:\n';
+        for (const link of downloadOnlyLinks.slice(0, 10)) {
+          linkInfo += `• ${link.text}: ${link.url}\n`;
+        }
+      }
+
+      return linkInfo;
+    } catch {
+      return '';
+    }
+  }
+
+  private async executeGotoUrl(url: string): Promise<Anthropic.Beta.Messages.BetaToolResultBlockParam['content']> {
+    this.log(`Navigating to: ${url}`);
+
+    try {
+      await this.browser.goto(url);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Take screenshot and extract links
+      const screenshot = await this.browser.screenshot();
+      const state = await this.browser.getState();
+      const linkInfo = await this.extractAndFormatLinks();
+
+      return [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: screenshot.base64,
+          },
+        },
+        {
+          type: 'text',
+          text: `Navigated to: ${state.url}\nTitle: ${state.title}${linkInfo}`,
+        },
+      ];
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      this.log(`Navigation error: ${errorMsg}`);
+      return [{ type: 'text', text: `Error navigating to ${url}: ${errorMsg}` }];
+    }
   }
 
   private async executeComputerAction(input: Record<string, unknown>): Promise<Anthropic.Beta.Messages.BetaToolResultBlockParam['content']> {
