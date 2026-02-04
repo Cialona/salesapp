@@ -145,9 +145,9 @@ with tab_docs:
             """, unsafe_allow_html=True)
 
             if url:
-                st.link_button(f"📥 Openen", url, use_container_width=True)
+                st.link_button(f"📥 Openen", url, use_container_width=True, key=f"open_{doc_key}")
             else:
-                st.button("❌ Niet gevonden", disabled=True, use_container_width=True)
+                st.button("❌ Niet gevonden", disabled=True, use_container_width=True, key=f"missing_{doc_key}")
 
     # Render document cards
     render_doc_card('floorplan', 'floorplan_url', col1)
