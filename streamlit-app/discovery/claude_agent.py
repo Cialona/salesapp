@@ -204,19 +204,48 @@ class ClaudeAgent:
         parsed_base = urlparse(base_url)
         base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
 
+        # Extract fair-specific path (e.g., /en/eurocucina from the URL)
+        fair_path = parsed_base.path.rstrip('/')
+        fair_segments = [s for s in fair_path.split('/') if s]
+
         # URLs to try scanning
         urls_to_scan = [base_url]
 
-        # Add common document page patterns
-        common_paths = [
+        # Add common document page patterns (generic)
+        generic_paths = [
             '/en/exhibitors', '/exhibitors', '/en/participate', '/participate',
             '/en/services', '/services', '/en/downloads', '/downloads',
             '/en/information', '/information', '/en/planning', '/planning',
             '/for-exhibitors', '/aussteller', '/espositori', '/partecipare',
         ]
 
-        for path in common_paths:
+        # Add fair-specific paths (e.g., /en/eurocucina/exhibitors)
+        fair_specific_suffixes = [
+            '/exhibitors', '/participate', '/services', '/downloads',
+            '/information', '/planning', '/technical', '/regulations',
+            '/stand-design', '/documents', '/for-exhibitors',
+        ]
+
+        # Add generic paths
+        for path in generic_paths:
             urls_to_scan.append(f"{base_domain}{path}")
+
+        # Add fair-specific paths (important for sites like salonemilano.it)
+        if fair_path:
+            for suffix in fair_specific_suffixes:
+                urls_to_scan.append(f"{base_domain}{fair_path}{suffix}")
+
+            # Also try parent paths with suffixes
+            if len(fair_segments) >= 2:
+                parent_path = '/' + '/'.join(fair_segments[:-1])
+                for suffix in fair_specific_suffixes:
+                    urls_to_scan.append(f"{base_domain}{parent_path}{suffix}")
+
+        # Remove duplicates while preserving order
+        seen = set()
+        urls_to_scan = [x for x in urls_to_scan if not (x in seen or seen.add(x))]
+
+        self._log(f"Pre-scan will check {len(urls_to_scan)} URLs")
 
         # Keywords that indicate important document links
         doc_keywords = [
@@ -226,12 +255,16 @@ class ClaudeAgent:
             'floor', 'plan', 'hall', 'gelaende', 'exhibitor', 'aussteller',
         ]
 
+        found_pages_to_scan = []  # Pages found that we should also scan
+
         async with aiohttp.ClientSession() as session:
-            for url in urls_to_scan[:10]:  # Limit to 10 URLs to avoid slowdown
+            # First pass: scan initial URLs
+            for url in urls_to_scan[:15]:  # Increased limit
                 try:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
                         if response.status == 200:
                             html = await response.text()
+                            self._log(f"  ✓ Scanning: {url}")
 
                             # Extract all links using regex
                             link_pattern = r'href=["\']([^"\']+)["\']'
@@ -253,13 +286,13 @@ class ClaudeAgent:
                                     if full_url not in [p['url'] for p in results['pdf_links']]:
                                         # Determine document type from URL
                                         doc_type = 'unknown'
-                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.']):
+                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.', 'reg_']):
                                             doc_type = 'technical_guidelines'
-                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento']):
+                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'smm_']):
                                             doc_type = 'exhibitor_manual'
-                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site']):
+                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site', 'map']):
                                             doc_type = 'floorplan'
-                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio']):
+                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar']):
                                             doc_type = 'schedule'
 
                                         results['pdf_links'].append({
@@ -267,17 +300,64 @@ class ClaudeAgent:
                                             'type': doc_type,
                                             'source_page': url
                                         })
+                                        self._log(f"    📄 Found PDF: {full_url[:80]}...")
 
-                                # Check for exhibitor-related pages
+                                # Check for pages that might contain documents
                                 if any(kw in lower_url for kw in doc_keywords):
-                                    if full_url not in results['exhibitor_pages'] and not '.pdf' in lower_url:
+                                    if full_url not in results['exhibitor_pages'] and '.pdf' not in lower_url:
                                         results['exhibitor_pages'].append(full_url)
+                                        # Add to second-pass scan if it's on same domain
+                                        if parsed_base.netloc in full_url and full_url not in urls_to_scan:
+                                            found_pages_to_scan.append(full_url)
 
                 except Exception as e:
-                    self._log(f"Pre-scan error for {url}: {e}")
+                    # Silently skip failed URLs
                     continue
 
-        self._log(f"Pre-scan found {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
+            # Second pass: scan pages found in first pass (might contain hidden PDFs)
+            for url in found_pages_to_scan[:10]:
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True) as response:
+                        if response.status == 200:
+                            html = await response.text()
+                            self._log(f"  ✓ Second-pass scan: {url}")
+
+                            link_pattern = r'href=["\']([^"\']+)["\']'
+                            links = re.findall(link_pattern, html, re.IGNORECASE)
+
+                            for link in links:
+                                if link.startswith('/'):
+                                    full_url = f"{base_domain}{link}"
+                                elif link.startswith('http'):
+                                    full_url = link
+                                else:
+                                    full_url = urljoin(url, link)
+
+                                lower_url = full_url.lower()
+
+                                if '.pdf' in lower_url or '/sites/default/files/' in lower_url:
+                                    if full_url not in [p['url'] for p in results['pdf_links']]:
+                                        doc_type = 'unknown'
+                                        if any(kw in lower_url for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.', 'reg_']):
+                                            doc_type = 'technical_guidelines'
+                                        elif any(kw in lower_url for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'smm_']):
+                                            doc_type = 'exhibitor_manual'
+                                        elif any(kw in lower_url for kw in ['floor', 'plan', 'hall', 'gelaende', 'site', 'map']):
+                                            doc_type = 'floorplan'
+                                        elif any(kw in lower_url for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar']):
+                                            doc_type = 'schedule'
+
+                                        results['pdf_links'].append({
+                                            'url': full_url,
+                                            'type': doc_type,
+                                            'source_page': url
+                                        })
+                                        self._log(f"    📄 Found PDF (2nd pass): {full_url[:80]}...")
+
+                except Exception:
+                    continue
+
+        self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
 
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
