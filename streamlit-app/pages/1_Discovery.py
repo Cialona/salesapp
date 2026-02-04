@@ -1,12 +1,15 @@
 """
 Cialona Trade Fair Discovery - Discovery Page
-Start new discoveries and import results.
+Simple interface to start discoveries directly in the app.
 """
 
 import streamlit as st
 import json
-from pathlib import Path
+import asyncio
+import subprocess
 import sys
+from pathlib import Path
+import os
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -22,6 +25,38 @@ st.set_page_config(
 
 # Inject custom CSS
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+def ensure_playwright_installed():
+    """Ensure Playwright browsers are installed."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception as e:
+        error_str = str(e)
+        if "Executable doesn't exist" in error_str or "browserType.launch" in error_str:
+            st.info("🔧 Eerste keer setup: Playwright browsers installeren...")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    return True
+                else:
+                    st.error(f"Playwright installatie mislukt: {result.stderr}")
+                    return False
+            except Exception as install_error:
+                st.error(f"Kon Playwright niet installeren: {install_error}")
+                return False
+        else:
+            st.error(f"Playwright fout: {e}")
+            return False
+
 
 # Sidebar
 with st.sidebar:
@@ -45,161 +80,202 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Tabs for different input methods
-tab1, tab2 = st.tabs(["📝 Handmatig Invoeren", "📥 JSON Importeren"])
+# Simple form - just name and URL
+st.markdown("### Beurs Informatie")
 
-with tab1:
-    st.markdown("### Beurs Informatie")
+col1, col2 = st.columns(2)
 
-    col1, col2 = st.columns(2)
+with col1:
+    fair_name = st.text_input(
+        "Beurs Naam *",
+        placeholder="bijv. Ambiente, bauma, ISPO Munich"
+    )
+    fair_url = st.text_input(
+        "Website URL",
+        placeholder="https://ambiente.messefrankfurt.com"
+    )
 
-    with col1:
-        fair_name = st.text_input(
-            "Beurs Naam *",
-            placeholder="bijv. Ambiente, bauma, ISPO Munich"
-        )
-        fair_url = st.text_input(
-            "Website URL",
-            placeholder="https://ambiente.messefrankfurt.com"
-        )
+with col2:
+    fair_city = st.text_input(
+        "Stad",
+        placeholder="bijv. Frankfurt, München"
+    )
+    fair_country = st.text_input(
+        "Land",
+        placeholder="bijv. Germany, Netherlands"
+    )
 
-    with col2:
-        fair_city = st.text_input(
-            "Stad",
-            placeholder="bijv. Frankfurt, München"
-        )
-        fair_country = st.text_input(
-            "Land",
-            placeholder="bijv. Germany, Netherlands"
-        )
+st.markdown("---")
 
-    st.markdown("---")
+# Info box
+st.info("""
+**Hoe werkt het?**
+1. Voer de beursnaam en website URL in
+2. Klik op 'Start Discovery'
+3. De AI agent zoekt automatisch naar documenten (~2-3 minuten)
+4. Resultaten verschijnen direct in het dashboard
 
-    st.markdown("### Discovery Starten")
+**Geschatte kosten:** ~€1.75 per beurs
+""")
 
-    st.info("""
-    **Hoe werkt het?**
-    1. Voer de beursnaam en eventueel de URL in
-    2. Klik op 'Start Discovery'
-    3. De AI agent navigeert automatisch door de website
-    4. Resultaten worden opgeslagen in het dashboard
+# Check for API key
+api_key = os.environ.get('ANTHROPIC_API_KEY')
+if not api_key:
+    try:
+        api_key = st.secrets.get('ANTHROPIC_API_KEY')
+    except:
+        pass
 
-    **Geschatte kosten:** ~$1.90 per beurs
-    **Geschatte tijd:** 2-3 minuten
-    """)
-
-    # Discovery options
-    col_opt1, col_opt2 = st.columns(2)
-    with col_opt1:
-        max_iterations = st.slider("Max Iteraties", 10, 50, 30)
-    with col_opt2:
-        use_github_actions = st.checkbox("Via GitHub Actions", value=True,
-            help="Vink aan om discovery via GitHub Actions te runnen (aanbevolen)")
-
-    if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name):
-        if use_github_actions:
-            # Generate GitHub Actions workflow trigger info
-            st.markdown("### 🔧 GitHub Actions")
-            st.markdown("""
-            Om de discovery te starten via GitHub Actions:
-
-            1. Ga naar de [Test Single Fair](https://github.com/Cialona/salesapp/actions/workflows/test-single.yml) workflow
-            2. Klik op "Run workflow"
-            3. Selecteer de beurs of voer custom parameters in
-            4. Wacht tot de workflow klaar is
-            5. Download de JSON output en importeer hieronder
-            """)
-
-            # Show pre-filled workflow parameters
-            st.code(f"""
-fair_name: {fair_name}
-fair_url: {fair_url or 'auto-detect'}
-max_iterations: {max_iterations}
-            """, language="yaml")
-
-            st.warning("⚠️ Kopieer deze parameters naar de GitHub Actions workflow")
-        else:
-            # Direct discovery (requires local setup)
-            st.warning("⚠️ Directe discovery vereist lokale setup met Playwright. Gebruik GitHub Actions voor de beste ervaring.")
-
-            # Placeholder for future local integration
-            st.info("Lokale discovery wordt binnenkort toegevoegd...")
-
-with tab2:
-    st.markdown("### JSON Resultaat Importeren")
-
+if not api_key:
+    st.warning("⚠️ Anthropic API key niet geconfigureerd.")
     st.markdown("""
-    Plak hier het JSON resultaat van een discovery (via GitHub Actions of CLI).
+    **Hoe configureer je de API key?**
+    1. Ga naar je app in Streamlit Cloud
+    2. Klik op "Manage app" (rechtsonder) → "Settings" → "Secrets"
+    3. Voeg toe:
+    ```
+    ANTHROPIC_API_KEY = "sk-ant-..."
+    ```
     """)
+    st.stop()
+
+# Start Discovery button
+if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use_container_width=True):
+    if not fair_name:
+        st.error("Vul een beursnaam in")
+    else:
+        # Check Playwright installation
+        with st.spinner("Controleren van browser..."):
+            if not ensure_playwright_installed():
+                st.error("Browser kon niet worden gestart. Probeer het later opnieuw.")
+                st.stop()
+
+        # Show progress
+        progress_container = st.container()
+
+        with progress_container:
+            st.markdown("### 🔄 Discovery bezig...")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            log_expander = st.expander("📋 Voortgang details", expanded=True)
+
+            with log_expander:
+                log_container = st.empty()
+                logs = []
+
+        def update_logs(msg):
+            """Update the log display."""
+            logs.append(msg)
+            log_container.code("\n".join(logs[-25:]))  # Show last 25 lines
+
+        async def run_discovery_async():
+            """Run the discovery asynchronously."""
+            # Import the Python discovery module
+            from discovery.claude_agent import ClaudeAgent
+            from discovery.schemas import TestCaseInput, output_to_dict
+
+            update_logs(f"🎯 Zoeken naar: {fair_name}")
+            if fair_url:
+                update_logs(f"🌐 Start URL: {fair_url}")
+
+            progress_bar.progress(10)
+            status_text.text("AI agent wordt gestart...")
+
+            input_data = TestCaseInput(
+                fair_name=fair_name,
+                known_url=fair_url if fair_url else None,
+                city=fair_city if fair_city else None,
+                country=fair_country if fair_country else None
+            )
+
+            agent = ClaudeAgent(
+                api_key=api_key,
+                max_iterations=30,
+                debug=True,
+                on_status=update_logs
+            )
+
+            progress_bar.progress(20)
+            status_text.text("Navigeren door website...")
+
+            output = await agent.run(input_data)
+            return output_to_dict(output)
+
+        try:
+            # Run the async discovery
+            result = asyncio.run(run_discovery_async())
+
+            progress_bar.progress(90)
+            status_text.text("Resultaten verwerken...")
+
+            # Import the result into data manager
+            fair_id = dm.import_discovery_result(result)
+
+            progress_bar.progress(100)
+            status_text.text("✅ Discovery voltooid!")
+
+            update_logs("✅ Discovery succesvol afgerond!")
+
+            # Show results summary
+            fair = dm.get_fair(fair_id)
+            if fair:
+                completeness = fair.get('completeness', {})
+                st.success(f"""
+                **Discovery voltooid voor {fair_name}!**
+
+                Documenten gevonden: **{completeness.get('found', 0)}/{completeness.get('total', 5)}**
+                """)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📄 Bekijk Details", use_container_width=True):
+                        st.session_state['selected_fair'] = fair_id
+                        st.switch_page("pages/2_Fair_Details.py")
+                with col2:
+                    if st.button("🏠 Naar Dashboard", use_container_width=True):
+                        st.switch_page("app.py")
+
+        except Exception as e:
+            error_msg = str(e)
+            update_logs(f"❌ Fout: {error_msg}")
+            st.error(f"Er ging iets mis: {error_msg}")
+
+            # Show more details for debugging
+            import traceback
+            with st.expander("🔧 Technische details"):
+                st.code(traceback.format_exc())
+
+st.markdown("---")
+
+# Alternative: JSON Import (collapsible, for advanced users)
+with st.expander("📥 JSON Importeren (voor beheerders)"):
+    st.markdown("Heb je al een discovery resultaat? Plak de JSON hier.")
 
     json_input = st.text_area(
         "JSON Data",
-        height=400,
+        height=200,
         placeholder='{"fair_name": "Ambiente", "documents": {...}, ...}'
     )
 
-    # File upload option
     uploaded_file = st.file_uploader("Of upload een JSON bestand", type=['json'])
 
     if uploaded_file is not None:
         json_input = uploaded_file.read().decode('utf-8')
         st.success(f"Bestand geladen: {uploaded_file.name}")
 
-    if st.button("📥 Importeren", type="primary", disabled=not json_input):
+    if st.button("📥 Importeren", disabled=not json_input):
         try:
             discovery_data = json.loads(json_input)
 
-            # Validate required fields
             if 'fair_name' not in discovery_data:
-                st.error("❌ JSON moet een 'fair_name' veld bevatten")
+                st.error("JSON moet een 'fair_name' veld bevatten")
             else:
-                # Import the discovery result
                 fair_id = dm.import_discovery_result(discovery_data)
+                st.success(f"✅ Beurs '{discovery_data['fair_name']}' geïmporteerd!")
 
-                st.success(f"✅ Beurs '{discovery_data['fair_name']}' succesvol geïmporteerd!")
-
-                # Show summary
-                fair = dm.get_fair(fair_id)
-                if fair:
-                    completeness = fair.get('completeness', {})
-                    st.markdown(f"""
-                    **Resultaat:**
-                    - Documenten gevonden: {completeness.get('found', 0)}/{completeness.get('total', 5)}
-                    - Status: {fair.get('status', 'unknown').title()}
-                    """)
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("📄 Bekijk Details"):
-                            st.session_state['selected_fair'] = fair_id
-                            st.switch_page("pages/2_Fair_Details.py")
-                    with col2:
-                        if st.button("🏠 Naar Dashboard"):
-                            st.switch_page("app.py")
+                if st.button("Bekijk Details"):
+                    st.session_state['selected_fair'] = fair_id
+                    st.switch_page("pages/2_Fair_Details.py")
 
         except json.JSONDecodeError as e:
-            st.error(f"❌ Ongeldige JSON: {e}")
-        except Exception as e:
-            st.error(f"❌ Fout bij importeren: {e}")
-
-# Recent imports section
-st.markdown("---")
-st.markdown("### 📋 Recente Beurzen")
-
-fairs = dm.get_fairs_for_display()[:5]  # Last 5
-if fairs:
-    for fair in fairs:
-        completeness = fair.get('completeness', {})
-        status_emoji = {"complete": "✅", "partial": "⚠️", "missing": "❌"}.get(fair['status'], "❓")
-
-        col1, col2, col3 = st.columns([3, 1, 1])
-        with col1:
-            st.write(f"{status_emoji} **{fair['name']}**")
-        with col2:
-            st.write(f"{completeness.get('found', 0)}/{completeness.get('total', 5)} docs")
-        with col3:
-            if st.button("Bekijk", key=f"view_{fair['id']}"):
-                st.session_state['selected_fair'] = fair['id']
-                st.switch_page("pages/2_Fair_Details.py")
-else:
-    st.info("Nog geen beurzen geïmporteerd. Start een discovery of importeer JSON resultaten.")
+            st.error(f"Ongeldige JSON: {e}")
