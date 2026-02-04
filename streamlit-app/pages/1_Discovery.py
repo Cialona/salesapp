@@ -6,8 +6,9 @@ Simple interface to start discoveries directly in the app.
 import streamlit as st
 import json
 import asyncio
-from pathlib import Path
+import subprocess
 import sys
+from pathlib import Path
 import os
 
 # Add parent directory to path for imports
@@ -24,6 +25,38 @@ st.set_page_config(
 
 # Inject custom CSS
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+def ensure_playwright_installed():
+    """Ensure Playwright browsers are installed."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception as e:
+        error_str = str(e)
+        if "Executable doesn't exist" in error_str or "browserType.launch" in error_str:
+            st.info("🔧 Eerste keer setup: Playwright browsers installeren...")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    return True
+                else:
+                    st.error(f"Playwright installatie mislukt: {result.stderr}")
+                    return False
+            except Exception as install_error:
+                st.error(f"Kon Playwright niet installeren: {install_error}")
+                return False
+        else:
+            st.error(f"Playwright fout: {e}")
+            return False
+
 
 # Sidebar
 with st.sidebar:
@@ -86,10 +119,24 @@ st.info("""
 """)
 
 # Check for API key
-api_key = os.environ.get('ANTHROPIC_API_KEY') or st.secrets.get('ANTHROPIC_API_KEY', None)
+api_key = os.environ.get('ANTHROPIC_API_KEY')
+if not api_key:
+    try:
+        api_key = st.secrets.get('ANTHROPIC_API_KEY')
+    except:
+        pass
 
 if not api_key:
-    st.warning("⚠️ Anthropic API key niet geconfigureerd. Vraag de beheerder om deze toe te voegen in de app settings.")
+    st.warning("⚠️ Anthropic API key niet geconfigureerd.")
+    st.markdown("""
+    **Hoe configureer je de API key?**
+    1. Ga naar je app in Streamlit Cloud
+    2. Klik op "Manage app" (rechtsonder) → "Settings" → "Secrets"
+    3. Voeg toe:
+    ```
+    ANTHROPIC_API_KEY = "sk-ant-..."
+    ```
+    """)
     st.stop()
 
 # Start Discovery button
@@ -97,6 +144,12 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
     if not fair_name:
         st.error("Vul een beursnaam in")
     else:
+        # Check Playwright installation
+        with st.spinner("Controleren van browser..."):
+            if not ensure_playwright_installed():
+                st.error("Browser kon niet worden gestart. Probeer het later opnieuw.")
+                st.stop()
+
         # Show progress
         progress_container = st.container()
 
@@ -110,108 +163,87 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
                 log_container = st.empty()
                 logs = []
 
-        try:
-            # Import the discovery module
-            status_text.text("Initialiseren...")
-            progress_bar.progress(5)
+        def update_logs(msg):
+            """Update the log display."""
+            logs.append(msg)
+            log_container.code("\n".join(logs[-25:]))  # Show last 25 lines
 
-            # We need to run the TypeScript agent via subprocess
-            # For now, let's use a Python-based approach that calls the CLI
-            import subprocess
-            import tempfile
+        async def run_discovery_async():
+            """Run the discovery asynchronously."""
+            # Import the Python discovery module
+            from discovery.claude_agent import ClaudeAgent
+            from discovery.schemas import TestCaseInput, output_to_dict
 
-            status_text.text("Discovery starten...")
-            progress_bar.progress(10)
-
-            # Create input JSON
-            input_data = {
-                "fair_name": fair_name,
-                "known_url": fair_url if fair_url else None,
-                "city": fair_city if fair_city else None,
-                "country": fair_country if fair_country else None
-            }
-
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                json.dump(input_data, f)
-                input_file = f.name
-
-            logs.append(f"🎯 Zoeken naar: {fair_name}")
+            update_logs(f"🎯 Zoeken naar: {fair_name}")
             if fair_url:
-                logs.append(f"🌐 Start URL: {fair_url}")
-            log_container.code("\n".join(logs))
+                update_logs(f"🌐 Start URL: {fair_url}")
 
-            status_text.text("AI agent navigeert door de website...")
-            progress_bar.progress(20)
+            progress_bar.progress(10)
+            status_text.text("AI agent wordt gestart...")
 
-            # Run the discovery CLI
-            # Note: This requires the Node.js environment to be set up
-            result = subprocess.run(
-                ['npx', 'tsx', 'cli/discover-claude.ts', '--input', input_file, '--output', '/dev/stdout'],
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
-                env={**os.environ, 'ANTHROPIC_API_KEY': api_key}
+            input_data = TestCaseInput(
+                fair_name=fair_name,
+                known_url=fair_url if fair_url else None,
+                city=fair_city if fair_city else None,
+                country=fair_country if fair_country else None
             )
 
+            agent = ClaudeAgent(
+                api_key=api_key,
+                max_iterations=30,
+                debug=True,
+                on_status=update_logs
+            )
+
+            progress_bar.progress(20)
+            status_text.text("Navigeren door website...")
+
+            output = await agent.run(input_data)
+            return output_to_dict(output)
+
+        try:
+            # Run the async discovery
+            result = asyncio.run(run_discovery_async())
+
             progress_bar.progress(90)
+            status_text.text("Resultaten verwerken...")
 
-            if result.returncode == 0:
-                # Parse the output JSON
-                output_lines = result.stdout.strip().split('\n')
-                # Find the JSON output (last valid JSON in output)
-                json_output = None
-                for line in reversed(output_lines):
-                    try:
-                        json_output = json.loads(line)
-                        break
-                    except:
-                        continue
+            # Import the result into data manager
+            fair_id = dm.import_discovery_result(result)
 
-                if json_output:
-                    # Import the result
-                    fair_id = dm.import_discovery_result(json_output)
+            progress_bar.progress(100)
+            status_text.text("✅ Discovery voltooid!")
 
-                    progress_bar.progress(100)
-                    status_text.text("✅ Discovery voltooid!")
+            update_logs("✅ Discovery succesvol afgerond!")
 
-                    logs.append("✅ Discovery succesvol afgerond!")
-                    log_container.code("\n".join(logs))
+            # Show results summary
+            fair = dm.get_fair(fair_id)
+            if fair:
+                completeness = fair.get('completeness', {})
+                st.success(f"""
+                **Discovery voltooid voor {fair_name}!**
 
-                    # Show results summary
-                    fair = dm.get_fair(fair_id)
-                    if fair:
-                        completeness = fair.get('completeness', {})
-                        st.success(f"""
-                        **Discovery voltooid voor {fair_name}!**
+                Documenten gevonden: **{completeness.get('found', 0)}/{completeness.get('total', 5)}**
+                """)
 
-                        Documenten gevonden: **{completeness.get('found', 0)}/{completeness.get('total', 5)}**
-                        """)
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📄 Bekijk Details", use_container_width=True):
+                        st.session_state['selected_fair'] = fair_id
+                        st.switch_page("pages/2_Fair_Details.py")
+                with col2:
+                    if st.button("🏠 Naar Dashboard", use_container_width=True):
+                        st.switch_page("app.py")
 
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.button("📄 Bekijk Details", use_container_width=True):
-                                st.session_state['selected_fair'] = fair_id
-                                st.switch_page("pages/2_Fair_Details.py")
-                        with col2:
-                            if st.button("🏠 Naar Dashboard", use_container_width=True):
-                                st.switch_page("app.py")
-                else:
-                    st.error("Kon resultaat niet verwerken")
-                    st.code(result.stdout)
-            else:
-                st.error(f"Discovery mislukt: {result.stderr}")
-                logs.append(f"❌ Fout: {result.stderr}")
-                log_container.code("\n".join(logs))
-
-        except subprocess.TimeoutExpired:
-            st.error("Discovery duurde te lang (timeout na 5 minuten)")
-        except FileNotFoundError:
-            st.error("Node.js/npm niet gevonden. Neem contact op met de beheerder.")
         except Exception as e:
-            st.error(f"Er ging iets mis: {str(e)}")
+            error_msg = str(e)
+            update_logs(f"❌ Fout: {error_msg}")
+            st.error(f"Er ging iets mis: {error_msg}")
+
+            # Show more details for debugging
             import traceback
-            st.code(traceback.format_exc())
+            with st.expander("🔧 Technische details"):
+                st.code(traceback.format_exc())
 
 st.markdown("---")
 
