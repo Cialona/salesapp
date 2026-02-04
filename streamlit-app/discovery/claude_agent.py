@@ -103,6 +103,9 @@ GEBRUIK DEZE URLS DIRECT - je hoeft NIET te klikken om ze te downloaden.
 
 1. **computer** - voor screenshots en interactie
 2. **goto_url** - DIRECT naar URL navigeren (gebruik voor subdomeinen, PDF links, en alternatieve paden)
+3. **deep_scan** - GEBRUIK DIT! Scant de hele pagina, opent alle accordions/dropdowns, en toont ALLE PDF/document links. Gebruik dit op elke belangrijke pagina (Participate, For Exhibitors, Downloads, etc.)
+
+⚠️ BELANGRIJK: Gebruik deep_scan op elke pagina waar je documenten verwacht! Het vindt verborgen links die je niet op de screenshot ziet.
 
 === SCHEDULE FORMAT ===
 
@@ -304,6 +307,15 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                                 "required": ["url"],
                             },
                         },
+                        {
+                            "name": "deep_scan",
+                            "description": "Perform a deep scan of the current page to find ALL document links. This expands all accordions, dropdowns, and hidden sections, then extracts every PDF and document link. Use this when you suspect there are hidden documents on the page.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                            },
+                        },
                     ],
                     messages=messages,
                 )
@@ -351,6 +363,14 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                     elif tool_use.name == "goto_url":
                         url = tool_use.input.get("url", "")
                         result = await self._execute_goto_url(url)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": result,
+                        })
+
+                    elif tool_use.name == "deep_scan":
+                        result = await self._execute_deep_scan()
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
@@ -423,6 +443,12 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             relevant_links = await self.browser.get_relevant_links()
             link_info = ""
 
+            # Show high-value links first (technical regulations, provisions, etc.)
+            if relevant_links.get('high_value_links'):
+                link_info += "\n\n⭐ BELANGRIJKE DOCUMENTEN GEVONDEN:\n"
+                for link in relevant_links['high_value_links'][:10]:
+                    link_info += f"• ⭐ {link.text or 'Document'}: {link.url}\n"
+
             if relevant_links['pdf_links']:
                 link_info += "\n\n📄 PDF LINKS OP DEZE PAGINA:\n"
                 for link in relevant_links['pdf_links'][:20]:
@@ -444,6 +470,52 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             return link_info
         except:
             return ""
+
+    async def _execute_deep_scan(self) -> List[Dict[str, Any]]:
+        """Execute deep scan to find all document links on the current page."""
+        self._log("Performing deep scan for documents...")
+
+        try:
+            # Get all links (accordion expansion happens automatically)
+            relevant_links = await self.browser.get_relevant_links()
+            state = await self.browser.get_state()
+
+            result_text = f"🔍 DEEP SCAN RESULTATEN voor {state.url}\n"
+            result_text += "=" * 60 + "\n\n"
+
+            # High-value documents first
+            if relevant_links.get('high_value_links'):
+                result_text += "⭐⭐⭐ BELANGRIJKE DOCUMENTEN (technical/regulations/provisions):\n"
+                for link in relevant_links['high_value_links']:
+                    result_text += f"  ⭐ {link.text[:80]}\n     URL: {link.url}\n\n"
+            else:
+                result_text += "⚠️ Geen high-value documenten gevonden op deze pagina.\n\n"
+
+            # All PDFs
+            if relevant_links['pdf_links']:
+                result_text += f"\n📄 ALLE PDF LINKS ({len(relevant_links['pdf_links'])} gevonden):\n"
+                for link in relevant_links['pdf_links'][:30]:
+                    result_text += f"  • {link.text[:60] or 'PDF'}\n    URL: {link.url}\n"
+            else:
+                result_text += "\n📄 Geen PDF links gevonden.\n"
+
+            # CMS/Download links
+            if relevant_links['download_links']:
+                result_text += f"\n📥 DOWNLOAD/CMS LINKS ({len(relevant_links['download_links'])} gevonden):\n"
+                seen_urls = set()
+                for link in relevant_links['download_links'][:20]:
+                    if link.url not in seen_urls:
+                        seen_urls.add(link.url)
+                        result_text += f"  • {link.text[:60]}\n    URL: {link.url}\n"
+
+            result_text += "\n" + "=" * 60
+            result_text += "\n💡 TIP: Gebruik goto_url om direct naar een PDF te navigeren!"
+
+            return [{"type": "text", "text": result_text}]
+
+        except Exception as e:
+            self._log(f"Deep scan error: {e}")
+            return [{"type": "text", "text": f"Deep scan error: {e}"}]
 
     async def _execute_goto_url(self, url: str) -> List[Dict[str, Any]]:
         """Execute goto_url tool."""
