@@ -203,6 +203,7 @@ class ClaudeAgent:
 
         parsed_base = urlparse(base_url)
         base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+        base_netloc = parsed_base.netloc
 
         # Extract fair-specific path (e.g., /en/eurocucina from the URL)
         fair_path = parsed_base.path.rstrip('/')
@@ -210,6 +211,38 @@ class ClaudeAgent:
 
         # URLs to try scanning
         urls_to_scan = [base_url]
+
+        # === DETECT RELATED DOMAINS ===
+        # Many fairs have exhibitor portals on separate subdomains
+        related_domains = []
+
+        # Extract root domain (e.g., fieramilano.it from salonemilano.it)
+        domain_parts = base_netloc.split('.')
+        if len(domain_parts) >= 2:
+            root_domain = '.'.join(domain_parts[-2:])  # e.g., fieramilano.it
+
+            # Common exhibitor portal patterns
+            exhibitor_subdomains = [
+                f"exhibitors.{root_domain}",
+                f"aussteller.{root_domain}",
+                f"espositori.{root_domain}",
+                f"expo.{root_domain}",
+                f"services.{root_domain}",
+            ]
+
+            # Special case: salonemilano.it -> fieramilano.it ecosystem
+            if 'salonemilano' in base_netloc:
+                exhibitor_subdomains.extend([
+                    'exhibitors.fieramilano.it',
+                    'www.fieramilano.it',
+                ])
+
+            for subdomain in exhibitor_subdomains:
+                related_domains.append(f"https://{subdomain}")
+
+        # Add related domain root pages
+        for domain in related_domains:
+            urls_to_scan.append(domain)
 
         # Add common document page patterns (generic)
         generic_paths = [
@@ -226,7 +259,7 @@ class ClaudeAgent:
             '/stand-design', '/documents', '/for-exhibitors',
         ]
 
-        # Add generic paths
+        # Add generic paths to base domain
         for path in generic_paths:
             urls_to_scan.append(f"{base_domain}{path}")
 
@@ -245,7 +278,7 @@ class ClaudeAgent:
         seen = set()
         urls_to_scan = [x for x in urls_to_scan if not (x in seen or seen.add(x))]
 
-        self._log(f"Pre-scan will check {len(urls_to_scan)} URLs with JavaScript execution")
+        self._log(f"Pre-scan will check {len(urls_to_scan)} URLs (including {len(related_domains)} related domains)")
 
         # Keywords that indicate important document links
         doc_keywords = [
@@ -322,27 +355,47 @@ class ClaudeAgent:
                                 })
                                 self._log(f"    ⭐ High-value doc: {link.text[:40]}...")
 
-                    # Collect exhibitor-related pages for second pass
-                    for link in relevant_links.get('exhibitor_links', []):
+                    # Collect document-related pages for second pass (including cross-domain)
+                    for link in relevant_links.get('exhibitor_links', []) + relevant_links.get('download_links', []):
                         lower_url = link.url.lower()
+
+                        # Skip listing pages (exhibitor directories with pagination)
+                        if '?pagenumber=' in lower_url or '?anno=' in lower_url or '?page=' in lower_url:
+                            continue
+
+                        # Check if this looks like a document page
                         if any(kw in lower_url for kw in doc_keywords):
                             if link.url not in results['exhibitor_pages'] and '.pdf' not in lower_url:
                                 results['exhibitor_pages'].append(link.url)
-                                if parsed_base.netloc in link.url and link.url not in urls_to_scan:
+
+                                # Allow cross-domain links to related exhibitor portals
+                                is_related_domain = any(rd in link.url for rd in ['exhibitors.', 'aussteller.', 'espositori.', 'fieramilano.it', '/content/dam/'])
+                                is_same_domain = parsed_base.netloc in link.url
+
+                                if (is_same_domain or is_related_domain) and link.url not in urls_to_scan:
                                     found_pages_to_scan.append(link.url)
+                                    self._log(f"    🔗 Found document page: {link.url[:60]}...")
 
                 except Exception as e:
                     # Silently skip failed URLs
                     continue
 
-            # Second pass: scan discovered pages (might contain hidden PDFs)
-            for url in found_pages_to_scan[:10]:
+            # Second pass: scan discovered document pages (might contain hidden PDFs)
+            scanned_in_second_pass = 0
+            for url in found_pages_to_scan[:15]:  # Increased limit for cross-domain pages
                 try:
-                    if url in [u for u in urls_to_scan[:15]]:  # Skip already scanned
+                    # Skip already scanned URLs
+                    if url in urls_to_scan[:20]:
+                        continue
+
+                    # Skip listing pages
+                    lower_url = url.lower()
+                    if '?pagenumber=' in lower_url or '?anno=' in lower_url or '?page=' in lower_url:
                         continue
 
                     await pre_scan_browser.goto(url)
                     await asyncio.sleep(0.5)
+                    scanned_in_second_pass += 1
 
                     self._log(f"  ✓ Second-pass scan: {url}")
 
