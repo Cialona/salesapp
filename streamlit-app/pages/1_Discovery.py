@@ -9,7 +9,10 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime
 import os
+
+import anthropic
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -58,6 +61,52 @@ def ensure_playwright_installed():
             return False
 
 
+def find_fair_website(api_key: str, fair_name: str, year: int, city: str = None) -> dict:
+    """Use Claude to find the official website URL for a trade fair."""
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = f"""Find the official website URL for this trade fair:
+
+Trade Fair: {fair_name}
+Year: {year}
+{f'City: {city}' if city else ''}
+
+Return ONLY a JSON object with these fields:
+- url: The official website URL (the exhibitor/aussteller section if possible)
+- confidence: "high", "medium", or "low"
+- notes: Brief explanation
+
+Example response:
+{{"url": "https://www.bauma.de/en/trade-fair/exhibitors/", "confidence": "high", "notes": "Official bauma website, exhibitor section"}}
+
+If you cannot find a reliable URL, return:
+{{"url": null, "confidence": "low", "notes": "Could not find official website"}}
+
+Return ONLY the JSON, no other text."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Try to parse JSON from response
+        # Handle cases where response might have markdown code blocks
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
+        result = json.loads(response_text)
+        return result
+
+    except Exception as e:
+        return {"url": None, "confidence": "low", "notes": f"Error: {str(e)}"}
+
+
 # Sidebar
 with st.sidebar:
     st.markdown(f"""
@@ -80,7 +129,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Simple form - just name and URL
+# Simple form
 st.markdown("### Beurs Informatie")
 
 col1, col2 = st.columns(2)
@@ -90,19 +139,22 @@ with col1:
         "Beurs Naam *",
         placeholder="bijv. Ambiente, bauma, ISPO Munich"
     )
-    fair_url = st.text_input(
-        "Website URL",
-        placeholder="https://ambiente.messefrankfurt.com"
+    fair_city = st.text_input(
+        "Stad",
+        placeholder="bijv. Frankfurt, München, Milaan"
     )
 
 with col2:
-    fair_city = st.text_input(
-        "Stad",
-        placeholder="bijv. Frankfurt, München"
+    # Year selector - default to current or next year
+    current_year = datetime.now().year
+    fair_year = st.selectbox(
+        "Jaar *",
+        options=[current_year, current_year + 1, current_year + 2, current_year - 1],
+        index=0
     )
     fair_country = st.text_input(
         "Land",
-        placeholder="bijv. Germany, Netherlands"
+        placeholder="bijv. Germany, Italy, Netherlands"
     )
 
 st.markdown("---")
@@ -110,12 +162,12 @@ st.markdown("---")
 # Info box
 st.info("""
 **Hoe werkt het?**
-1. Voer de beursnaam en website URL in
+1. Voer de beursnaam en het jaar in
 2. Klik op 'Start Discovery'
-3. De AI agent zoekt automatisch naar documenten (~2-3 minuten)
-4. Resultaten verschijnen direct in het dashboard
+3. De AI zoekt eerst de officiële website
+4. Daarna worden automatisch documenten gezocht (~2-3 minuten)
 
-**Geschatte kosten:** ~€1.75 per beurs
+**Geschatte kosten:** ~€1.80 per beurs
 """)
 
 # Check for API key
@@ -144,12 +196,6 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
     if not fair_name:
         st.error("Vul een beursnaam in")
     else:
-        # Check Playwright installation
-        with st.spinner("Controleren van browser..."):
-            if not ensure_playwright_installed():
-                st.error("Browser kon niet worden gestart. Probeer het later opnieuw.")
-                st.stop()
-
         # Show progress
         progress_container = st.container()
 
@@ -168,22 +214,48 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             logs.append(msg)
             log_container.code("\n".join(logs[-25:]))  # Show last 25 lines
 
+        # Step 1: Find the official website URL
+        update_logs(f"🔍 Zoeken naar officiële website voor: {fair_name} {fair_year}")
+        status_text.text("Officiële website zoeken...")
+        progress_bar.progress(5)
+
+        website_result = find_fair_website(api_key, fair_name, fair_year, fair_city)
+        fair_url = website_result.get("url")
+        confidence = website_result.get("confidence", "low")
+        notes = website_result.get("notes", "")
+
+        if fair_url:
+            update_logs(f"✅ Website gevonden: {fair_url}")
+            update_logs(f"   Zekerheid: {confidence} - {notes}")
+        else:
+            update_logs(f"⚠️ Geen website gevonden, probeer met Google zoeken...")
+            fair_url = None  # Will trigger Google search in agent
+
+        progress_bar.progress(10)
+
+        # Step 2: Check Playwright
+        status_text.text("Browser controleren...")
+        if not ensure_playwright_installed():
+            st.error("Browser kon niet worden gestart. Probeer het later opnieuw.")
+            st.stop()
+
+        progress_bar.progress(15)
+
         async def run_discovery_async():
             """Run the discovery asynchronously."""
-            # Import the Python discovery module
             from discovery.claude_agent import ClaudeAgent
             from discovery.schemas import TestCaseInput, output_to_dict
 
-            update_logs(f"🎯 Zoeken naar: {fair_name}")
             if fair_url:
                 update_logs(f"🌐 Start URL: {fair_url}")
+            else:
+                update_logs(f"🔍 Agent zal zelf zoeken naar de website")
 
-            progress_bar.progress(10)
             status_text.text("AI agent wordt gestart...")
 
             input_data = TestCaseInput(
-                fair_name=fair_name,
-                known_url=fair_url if fair_url else None,
+                fair_name=f"{fair_name} {fair_year}",
+                known_url=fair_url,
                 city=fair_city if fair_city else None,
                 country=fair_country if fair_country else None
             )
@@ -208,6 +280,9 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             progress_bar.progress(90)
             status_text.text("Resultaten verwerken...")
 
+            # Add year to result
+            result['year'] = fair_year
+
             # Import the result into data manager
             fair_id = dm.import_discovery_result(result)
 
@@ -221,7 +296,7 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             if fair:
                 completeness = fair.get('completeness', {})
                 st.success(f"""
-                **Discovery voltooid voor {fair_name}!**
+                **Discovery voltooid voor {fair_name} {fair_year}!**
 
                 Documenten gevonden: **{completeness.get('found', 0)}/{completeness.get('total', 5)}**
                 """)
@@ -240,7 +315,6 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             update_logs(f"❌ Fout: {error_msg}")
             st.error(f"Er ging iets mis: {error_msg}")
 
-            # Show more details for debugging
             import traceback
             with st.expander("🔧 Technische details"):
                 st.code(traceback.format_exc())
