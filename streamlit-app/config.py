@@ -224,8 +224,70 @@ CUSTOM_CSS = f"""
         color: white;
     }}
 
+    [data-testid="stSidebar"] .stMarkdown p {{
+        color: white !important;
+    }}
+
+    [data-testid="stSidebar"] .stMarkdown h1,
+    [data-testid="stSidebar"] .stMarkdown h2,
+    [data-testid="stSidebar"] .stMarkdown h3 {{
+        color: white !important;
+    }}
+
     [data-testid="stSidebar"] .stSelectbox label {{
-        color: white;
+        color: white !important;
+    }}
+
+    [data-testid="stSidebar"] .stTextInput label {{
+        color: white !important;
+    }}
+
+    [data-testid="stSidebar"] span {{
+        color: white !important;
+    }}
+
+    /* Sidebar page links */
+    [data-testid="stSidebar"] a {{
+        color: white !important;
+    }}
+
+    [data-testid="stSidebar"] .stPageLink {{
+        color: white !important;
+    }}
+
+    /* Make the sidebar navigation items visible */
+    [data-testid="stSidebarNav"] {{
+        background: transparent;
+    }}
+
+    [data-testid="stSidebarNav"] span {{
+        color: white !important;
+    }}
+
+    [data-testid="stSidebarNav"] a {{
+        color: white !important;
+    }}
+
+    /* Sidebar navigation list items */
+    [data-testid="stSidebarNavItems"] li {{
+        color: white !important;
+    }}
+
+    [data-testid="stSidebarNavItems"] li span {{
+        color: white !important;
+    }}
+
+    /* Active page in sidebar */
+    [data-testid="stSidebarNavLink"] {{
+        color: white !important;
+    }}
+
+    [data-testid="stSidebarNavLink"][aria-selected="true"] {{
+        background-color: rgba(247, 147, 30, 0.3) !important;
+    }}
+
+    [data-testid="stSidebarNavLink"]:hover {{
+        background-color: rgba(255, 255, 255, 0.1) !important;
     }}
 
     /* Progress Bar */
