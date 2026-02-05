@@ -6,6 +6,7 @@ Python implementation using the Anthropic SDK.
 import asyncio
 import json
 import re
+import socket
 import time
 from typing import Optional, List, Dict, Any, Callable
 from urllib.parse import urlparse, urljoin
@@ -213,49 +214,45 @@ class ClaudeAgent:
         # URLs to try scanning
         urls_to_scan = [base_url]
 
-        # === WEB SEARCH FOR EXHIBITOR PORTALS ===
-        # Search the web to discover exhibitor portals that may not be linked from main site
+        # === GENERATE INTELLIGENT SUBDOMAIN PATTERNS ===
+        # Generate likely exhibitor portal subdomains based on fair name
         discovered_portals = []
-        if fair_name:
-            self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
-            search_browser = BrowserController(800, 600)
-            try:
-                await search_browser.launch()
 
-                # Search queries to find exhibitor portals
-                search_queries = [
-                    f"{fair_name} exhibitor portal",
-                    f"{fair_name} exhibitor services login",
-                ]
+        def generate_fair_abbreviation(name: str) -> List[str]:
+            """Generate possible abbreviations from fair name."""
+            abbreviations = []
+            if not name:
+                return abbreviations
 
-                for query in search_queries[:1]:  # Limit to 1 search to save time
-                    try:
-                        search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-                        await search_browser.goto(search_url)
-                        await asyncio.sleep(1)
+            # Clean the name
+            clean_name = name.lower().strip()
+            words = clean_name.replace('-', ' ').replace('_', ' ').split()
 
-                        # Extract links from search results
-                        search_links = await search_browser.extract_links()
+            # Filter out common words
+            stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
+                         'il', 'la', 'le', 'del', 'della', 'di', 'expo', 'fair', 'trade',
+                         'show', 'exhibition', 'messe', 'fiera', 'salon', 'salone'}
+            significant_words = [w for w in words if w not in stop_words]
 
-                        for link in search_links:
-                            link_host = urlparse(link.url).netloc.lower()
+            # Abbreviation from first letters (e.g., "Seafood Expo Global" -> "seg")
+            if len(significant_words) >= 2:
+                abbrev = ''.join(w[0] for w in significant_words if w)
+                abbreviations.append(abbrev)
 
-                            # Look for exhibitor portal domains in search results
-                            if any(kw in link_host for kw in ['exhibitor', 'aussteller', 'espositori', 'portal']):
-                                # Skip Google's own domains
-                                if 'google' not in link_host and 'gstatic' not in link_host:
-                                    portal_base = f"https://{link_host}"
-                                    if portal_base not in discovered_portals:
-                                        discovered_portals.append(portal_base)
-                                        self._log(f"    🌐 Web search found portal: {link_host}")
-                    except Exception as e:
-                        self._log(f"    Search error: {e}")
-                        continue
+            # First word if it's a distinctive name (e.g., "PROVADA" -> "provada")
+            if words:
+                first_word = words[0]
+                if len(first_word) >= 4:
+                    abbreviations.append(first_word)
 
-            except Exception as e:
-                self._log(f"Web search error: {e}")
-            finally:
-                await search_browser.close()
+            # Combined form for two-word names (e.g., "EuroCucina" -> "eurocucina")
+            if len(words) == 1 and len(words[0]) >= 6:
+                abbreviations.append(words[0])
+
+            return list(set(abbreviations))  # Remove duplicates
+
+        abbreviations = generate_fair_abbreviation(fair_name)
+        self._log(f"🔍 Generated fair abbreviations: {abbreviations}")
 
         # === DETECT RELATED DOMAINS ===
         # Many fairs have exhibitor portals on separate subdomains
@@ -278,6 +275,31 @@ class ClaudeAgent:
                 f"services.{root_domain}",
             ]
 
+            # === ADD FAIR-SPECIFIC SUBDOMAIN PATTERNS ===
+            # Patterns like exhibitors-seg.seafoodexpo.com (abbreviation-based)
+            current_year = '2026'
+            previous_year = '2025'
+
+            for abbrev in abbreviations:
+                # Pattern: exhibitors-{abbrev}.domain (e.g., exhibitors-seg.seafoodexpo.com)
+                exhibitor_subdomains.append(f"exhibitors-{abbrev}.{root_domain}")
+
+                # Pattern: {abbrev}-exhibitors.domain
+                exhibitor_subdomains.append(f"{abbrev}-exhibitors.{root_domain}")
+
+                # Pattern: {abbrev}.domain (e.g., seg.seafoodexpo.com)
+                exhibitor_subdomains.append(f"{abbrev}.{root_domain}")
+
+                # Pattern: {abbrev}{year}.domain (e.g., seg2026.seafoodexpo.com)
+                exhibitor_subdomains.append(f"{abbrev}{current_year}.{root_domain}")
+                exhibitor_subdomains.append(f"{abbrev}{previous_year}.{root_domain}")
+
+                # Pattern: portal-{abbrev}.domain
+                exhibitor_subdomains.append(f"portal-{abbrev}.{root_domain}")
+
+                # Pattern: {abbrev}-portal.domain
+                exhibitor_subdomains.append(f"{abbrev}-portal.{root_domain}")
+
             # Special case: salonemilano.it -> fieramilano.it ecosystem
             if 'salonemilano' in base_netloc:
                 exhibitor_subdomains.extend([
@@ -285,8 +307,31 @@ class ClaudeAgent:
                     'www.fieramilano.it',
                 ])
 
+            # === VERIFY SUBDOMAINS EXIST ===
+            # Quick check which subdomains actually respond
+            verified_subdomains = []
+
+            self._log(f"  Checking {len(exhibitor_subdomains)} potential exhibitor portal subdomains...")
+
             for subdomain in exhibitor_subdomains:
+                try:
+                    # Quick DNS check (much faster than HTTP request)
+                    socket.setdefaulttimeout(1)
+                    socket.gethostbyname(subdomain)
+                    verified_subdomains.append(subdomain)
+                    self._log(f"    ✓ Found active subdomain: {subdomain}")
+                except (socket.gaierror, socket.timeout):
+                    # Domain doesn't exist or timeout - skip
+                    continue
+                except Exception:
+                    continue
+
+            # Add verified subdomains to related domains
+            for subdomain in verified_subdomains:
                 related_domains.append(f"https://{subdomain}")
+
+            if verified_subdomains:
+                self._log(f"  Found {len(verified_subdomains)} active exhibitor portal subdomains")
 
         # === PRIORITIZE DOCUMENT PAGES ===
         # These pages are most likely to have technical documents - scan them FIRST
