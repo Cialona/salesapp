@@ -232,7 +232,9 @@ class ClaudeAgent:
             stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
                          'il', 'la', 'le', 'del', 'della', 'di', 'fair', 'trade',
                          'show', 'exhibition', 'messe', 'fiera', 'salon', 'salone'}
-            significant_words = [w for w in words if w not in stop_words]
+
+            # Filter out years and numbers (e.g., "2026", "2025")
+            significant_words = [w for w in words if w not in stop_words and not w.isdigit()]
 
             # Abbreviation from first letters (e.g., "Seafood Expo Global" -> "seg")
             if len(significant_words) >= 2:
@@ -240,14 +242,24 @@ class ClaudeAgent:
                 abbreviations.append(abbrev)
 
             # First word if it's a distinctive name (e.g., "PROVADA" -> "provada")
-            if words:
-                first_word = words[0]
+            non_numeric_words = [w for w in words if not w.isdigit()]
+            if non_numeric_words:
+                first_word = non_numeric_words[0]
                 if len(first_word) >= 4:
                     abbreviations.append(first_word)
 
             # Combined form for two-word names (e.g., "EuroCucina" -> "eurocucina")
-            if len(words) == 1 and len(words[0]) >= 6:
-                abbreviations.append(words[0])
+            if len(non_numeric_words) == 1 and len(non_numeric_words[0]) >= 6:
+                abbreviations.append(non_numeric_words[0])
+
+            # === TRY COMMON VARIANTS ===
+            # If fair name contains 'expo' but no location qualifier, try adding 'global'
+            # Many fairs like "Seafood Expo" have portals at "exhibitors-seg.domain" (SEG = Seafood Expo Global)
+            if 'expo' in words and 'global' not in words:
+                variant_words = significant_words + ['global']
+                if len(variant_words) >= 2:
+                    abbrev_with_global = ''.join(w[0] for w in variant_words if w)
+                    abbreviations.append(abbrev_with_global)
 
             return list(set(abbreviations))  # Remove duplicates
 
