@@ -372,6 +372,18 @@ class ClaudeAgent:
             if verified_subdomains:
                 self._log(f"  Found {len(verified_subdomains)} active exhibitor portal subdomains")
 
+        # === WEB SEARCH FOR EXHIBITOR PORTALS ===
+        # Search the web to find exhibitor manuals/portals that may not be linked from main site
+        if fair_name:
+            self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
+            web_search_urls = await self._web_search_for_portals(fair_name)
+            for url in web_search_urls:
+                if url not in results['exhibitor_pages']:
+                    results['exhibitor_pages'].insert(0, url)
+                if url not in urls_to_scan:
+                    urls_to_scan.insert(1, url)  # Add right after base URL
+                    self._log(f"    🌐 Web search found: {url}")
+
         # === PRIORITIZE DOCUMENT PAGES ===
         # These pages are most likely to have technical documents - scan them FIRST
         priority_document_paths = [
@@ -801,6 +813,94 @@ class ClaudeAgent:
 
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
+
+    async def _web_search_for_portals(self, fair_name: str) -> List[str]:
+        """
+        Search the web for exhibitor portals and event manuals.
+        Uses DuckDuckGo HTML search (no API key required).
+        """
+        import urllib.request
+        import urllib.parse
+        import urllib.error
+
+        found_urls = []
+
+        # Clean fair name (remove year if present)
+        clean_name = re.sub(r'\s*20\d{2}\s*', ' ', fair_name).strip()
+
+        # Search queries to try
+        search_queries = [
+            f"{clean_name} exhibitor manual",
+            f"{clean_name} online event manual",
+            f"{clean_name} stand build regulations",
+        ]
+
+        # Domains we're interested in (external portals)
+        interesting_domains = [
+            'my.site.com',      # Salesforce community
+            'force.com',        # Salesforce
+            'salesforce.com',   # Salesforce
+            'cvent.com',        # Cvent
+            'a2zinc.net',       # A2Z events
+            'expocad.com',      # ExpoCad
+            'smallworldlabs.com',  # Small World Labs (Seafood Expo)
+            'event-assets.',    # GSMA event assets
+            'gsma.com',         # GSMA directly
+        ]
+
+        for query in search_queries[:2]:  # Limit to 2 searches to save time
+            try:
+                # Use DuckDuckGo HTML search
+                encoded_query = urllib.parse.quote_plus(query)
+                search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+
+                req = urllib.request.Request(
+                    search_url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                )
+
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    html = response.read().decode('utf-8', errors='ignore')
+
+                # Extract URLs from DuckDuckGo results
+                # DuckDuckGo uses uddg= parameter for actual URLs
+                url_pattern = r'uddg=([^&"]+)'
+                matches = re.findall(url_pattern, html)
+
+                for match in matches:
+                    try:
+                        decoded_url = urllib.parse.unquote(match)
+                        parsed = urlparse(decoded_url)
+
+                        # Check if it's an interesting external portal
+                        host = parsed.netloc.lower()
+
+                        # Skip the main fair domain (we already have that)
+                        if any(domain in host for domain in interesting_domains):
+                            # Reconstruct clean URL
+                            clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                            if clean_url not in found_urls:
+                                found_urls.append(clean_url)
+
+                        # Also check for exhibitor-related keywords in the URL
+                        url_lower = decoded_url.lower()
+                        if any(kw in url_lower for kw in ['exhibitor', 'oem', 'event-manual', 'eventmanual', 'stand-build']):
+                            if decoded_url not in found_urls and 'duckduckgo' not in decoded_url:
+                                found_urls.append(decoded_url)
+
+                    except Exception:
+                        continue
+
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+                self._log(f"    Web search error: {e}")
+                continue
+            except Exception as e:
+                self._log(f"    Web search error: {e}")
+                continue
+
+        return found_urls[:5]  # Return max 5 URLs to avoid overloading
 
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
