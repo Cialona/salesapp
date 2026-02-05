@@ -56,6 +56,21 @@ Als je de hoofdsite hebt gevonden, probeer ook:
 - [domain]/en/exhibitors of [domain]/exhibitors
 - [domain]/en/participate of [domain]/services
 
+**STAP 5: VOLG EXTERNE LINKS NAAR EXHIBITOR PORTALS! (KRITIEK!)**
+Veel beurzen hebben hun exhibitor documenten op EXTERNE platforms:
+- "Online Event Manual" (OEM) - vaak op Salesforce (my.site.com)
+- "Client Portal" of "Exhibitor Portal" - kunnen externe domeinen zijn
+- Links naar "Stand Build Rules", "Technical Manual", "Event Manual"
+
+⚠️ ALS JE LINKS ZIET NAAR:
+- my.site.com, salesforce.com, force.com
+- cvent.com, a2zinc.net, expocad
+- Elke link met "event manual", "OEM", "exhibitor manual/guide"
+
+→ VOLG DEZE LINKS MET goto_url! Ze bevatten vaak ALLE belangrijke documenten.
+→ Probeer de pagina te openen - veel van deze pagina's zijn PUBLIEK TOEGANKELIJK (geen login nodig)
+→ Negeer NIET links alleen omdat ze naar een ander domein gaan!
+
 === VALIDATIE CRITERIA ===
 
 **1. Floor Plan / Hall Plan (Plattegrond)**
@@ -535,6 +550,7 @@ class ClaudeAgent:
 
                     # === DISCOVER EXHIBITOR PORTAL SUBDOMAINS ===
                     # Look for links to external exhibitor portals (e.g., exhibitors-seg.seafoodexpo.com)
+                    # Also detect external event management platforms (Salesforce, etc.)
                     for link in relevant_links.get('all_links', []):
                         try:
                             link_parsed = urlparse(link.url)
@@ -544,6 +560,15 @@ class ClaudeAgent:
                             if link_host == base_netloc.lower():
                                 continue
 
+                            # Skip common non-portal external links
+                            skip_domains = ['google.', 'facebook.', 'twitter.', 'linkedin.', 'youtube.',
+                                          'instagram.', 'pinterest.', 'tiktok.', 'apple.com', 'play.google']
+                            if any(skip in link_host for skip in skip_domains):
+                                continue
+
+                            link_text_lower = (link.text or '').lower()
+                            link_url_lower = link.url.lower()
+
                             # Check if this looks like an exhibitor portal subdomain
                             exhibitor_portal_indicators = [
                                 'exhibitor', 'aussteller', 'espositori', 'exposant',
@@ -552,18 +577,65 @@ class ClaudeAgent:
 
                             is_exhibitor_portal = any(ind in link_host for ind in exhibitor_portal_indicators)
 
+                            # === NEW: Detect external event management platforms ===
+                            # Salesforce community sites, event platforms, etc.
+                            external_platform_indicators = [
+                                'my.site.com',      # Salesforce community (e.g., gsma.my.site.com)
+                                'force.com',        # Salesforce
+                                'salesforce.com',   # Salesforce
+                                'cvent.com',        # Cvent event platform
+                                'eventbrite.',      # Eventbrite
+                                'a]zinc.net',       # A2Z event platform
+                                'expocad.',         # ExpoCad
+                                'map-dynamics.',    # Map Dynamics
+                                'n200.com',         # Nth Degree events
+                            ]
+
+                            is_external_platform = any(plat in link_host for plat in external_platform_indicators)
+
+                            # === NEW: Keywords that indicate important exhibitor resources ===
+                            # These links should ALWAYS be followed even if on external domains
+                            high_value_keywords = [
+                                'event manual', 'online event manual', 'oem',
+                                'exhibitor manual', 'exhibitor handbook', 'exhibitor guide',
+                                'stand build', 'stand construction', 'stand regulations',
+                                'technical manual', 'technical guidelines', 'technical regulations',
+                                'build-up', 'build up', 'dismant', 'tear-down', 'tear down',
+                                'rules and regulations', 'exhibitor resource', 'exhibitor service',
+                                'standbau', 'aufbau', 'abbau', 'montaggio', 'allestimento',
+                            ]
+
+                            text_has_high_value = any(kw in link_text_lower for kw in high_value_keywords)
+                            url_has_high_value = any(kw.replace(' ', '') in link_url_lower.replace('-', '').replace('_', '')
+                                                    for kw in high_value_keywords)
+
                             # Also check if link text suggests exhibitor portal
-                            link_text_lower = (link.text or '').lower()
                             text_suggests_portal = any(kw in link_text_lower for kw in [
                                 'exhibitor portal', 'exhibitor service', 'for exhibitors',
-                                'booth', 'stand design', 'technical', 'regulations'
+                                'booth', 'stand design', 'technical', 'regulations',
+                                'client portal', 'participant portal', 'vendor portal'
                             ])
 
-                            if is_exhibitor_portal or text_suggests_portal:
-                                portal_url = f"{link_parsed.scheme}://{link_parsed.netloc}"
-                                if portal_url not in [p for p in found_pages_to_scan]:
-                                    found_pages_to_scan.append(portal_url)
-                                    self._log(f"    🌐 Discovered exhibitor portal: {link_host}")
+                            # Determine if we should follow this link
+                            should_follow = (
+                                is_exhibitor_portal or
+                                is_external_platform or
+                                text_has_high_value or
+                                url_has_high_value or
+                                text_suggests_portal
+                            )
+
+                            if should_follow:
+                                # For high-value links, add the full URL (not just the domain)
+                                if text_has_high_value or url_has_high_value:
+                                    if link.url not in found_pages_to_scan:
+                                        found_pages_to_scan.append(link.url)
+                                        self._log(f"    📚 Found event manual/resource link: {link.text[:40] if link.text else link_host}...")
+                                else:
+                                    portal_url = f"{link_parsed.scheme}://{link_parsed.netloc}"
+                                    if portal_url not in found_pages_to_scan:
+                                        found_pages_to_scan.append(portal_url)
+                                        self._log(f"    🌐 Discovered external portal: {link_host}")
                         except:
                             continue
 
