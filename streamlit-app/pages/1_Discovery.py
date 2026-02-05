@@ -192,6 +192,14 @@ with col2:
         placeholder="bijv. Germany, Italy, Netherlands"
     )
 
+# Client name for personalized email drafts
+st.markdown("### Klant Informatie (optioneel)")
+client_name = st.text_input(
+    "Klantnaam",
+    placeholder="bijv. ACME Corporation, Shell, Philips",
+    help="Als je een klantnaam invult, wordt deze gebruikt in de concept-email voor ontbrekende documenten"
+)
+
 st.markdown("---")
 
 # Info box
@@ -310,7 +318,8 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
                 fair_name=f"{fair_name} {fair_year}",
                 known_url=fair_url,
                 city=fair_city if fair_city else None,
-                country=fair_country if fair_country else None
+                country=fair_country if fair_country else None,
+                client_name=client_name if client_name else None
             )
 
             agent = ClaudeAgent(

@@ -13,6 +13,7 @@ class TestCaseInput:
     known_url: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
+    client_name: Optional[str] = None  # Name of the client we're building a stand for
 
 
 @dataclass
@@ -21,6 +22,22 @@ class ScheduleEntry:
     time: Optional[str] = None
     description: str = ""
     source_url: str = ""
+
+
+@dataclass
+class ContactEmail:
+    """Represents a discovered contact email with context."""
+    email: str
+    context: str = ""  # e.g., "exhibitor services", "technical support", "general info"
+    source_url: str = ""
+
+
+@dataclass
+class ContactInfo:
+    """Contact information for the fair organization."""
+    emails: List[ContactEmail] = field(default_factory=list)
+    phone: Optional[str] = None
+    organization_name: Optional[str] = None
 
 
 @dataclass
@@ -121,7 +138,9 @@ class DiscoveryOutput:
     primary_reasoning: Reasoning = field(default_factory=Reasoning)
     evidence: EvidenceSet = field(default_factory=EvidenceSet)
     debug: DebugInfo = field(default_factory=DebugInfo)
+    contact_info: ContactInfo = field(default_factory=ContactInfo)
     email_draft_if_missing: Optional[str] = None
+    year: Optional[int] = None
 
 
 def create_empty_output(fair_name: str) -> DiscoveryOutput:
@@ -203,5 +222,14 @@ def output_to_dict(output: DiscoveryOutput) -> Dict[str, Any]:
             },
             'notes': output.debug.notes,
         },
+        'contact_info': {
+            'emails': [
+                {'email': e.email, 'context': e.context, 'source_url': e.source_url}
+                for e in output.contact_info.emails
+            ],
+            'phone': output.contact_info.phone,
+            'organization_name': output.contact_info.organization_name,
+        },
         'email_draft_if_missing': output.email_draft_if_missing,
+        'year': output.year,
     }
