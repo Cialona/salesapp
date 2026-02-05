@@ -970,9 +970,9 @@ class ClaudeAgent:
             if input_data.known_url:
                 pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
 
-                # PHASE 1.5: Classify found documents with LLM
+                # PHASE 1.5: Classify found documents with LLM (STRICT validation)
                 if pre_scan_results['pdf_links']:
-                    self._log("📋 Starting document classification with LLM...")
+                    self._log("📋 Starting STRICT document classification with LLM...")
                     classifier = DocumentClassifier(self.client, self._log)
 
                     classification_result = await classifier.classify_documents(
@@ -982,26 +982,15 @@ class ClaudeAgent:
                         exhibitor_pages=pre_scan_results.get('exhibitor_pages', [])
                     )
 
-                    # Decision: Can we skip the browser agent?
-                    # We need at least: floorplan, exhibitor_manual OR rules, exhibitor_directory
-                    critical_found = sum([
-                        1 if classification_result.floorplan and classification_result.floorplan.confidence in ['strong', 'partial'] else 0,
-                        1 if classification_result.exhibitor_manual and classification_result.exhibitor_manual.confidence in ['strong', 'partial'] else 0,
-                        1 if classification_result.rules and classification_result.rules.confidence in ['strong', 'partial'] else 0,
-                        1 if classification_result.exhibitor_directory else 0,
-                    ])
-
-                    if critical_found >= 3:
-                        # We have enough documents - can potentially skip agent
-                        self._log(f"✅ Classificatie: {critical_found}/4 kritieke documenten gevonden via prescan!")
-
-                        if classification_result.all_found:
-                            self._log("🎉 ALLE documenten gevonden! Browser agent wordt overgeslagen.")
-                            skip_browser_agent = True
-                        else:
-                            self._log(f"⚠️ Nog missend: {', '.join(classification_result.missing_types)}")
+                    # QUALITY GATE: Only skip agent when classifier says it's safe
+                    # This requires 3+ documents with STRONG confidence (year+fair verified)
+                    if classification_result.skip_agent_safe:
+                        self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
+                        self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
+                        skip_browser_agent = True
                     else:
-                        self._log(f"🔍 Slechts {critical_found}/4 kritieke documenten - browser agent nodig")
+                        self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
+                        self._log("   Browser agent draait voor extra validatie.")
 
                 # Format pre-scan results for the agent
                 if pre_scan_results['pdf_links']:
@@ -1831,33 +1820,34 @@ Kind regards,
     ) -> DiscoveryOutput:
         """
         Build output directly from classification results (no browser agent needed).
-        This is used when the prescan + classification found all required documents.
+        This is used when the prescan + classification found all required documents
+        with STRONG confidence (year verified, fair verified).
         """
         # Set official URL/domain
         if input_data.known_url:
             output.official_url = input_data.known_url
             output.official_domain = urlparse(input_data.known_url).netloc
 
-        # Map classified documents to output
-        if classification.floorplan and classification.floorplan.confidence in ['strong', 'partial']:
+        # Map classified documents to output (ONLY strong confidence counts)
+        if classification.floorplan and classification.floorplan.confidence == 'strong':
             output.documents.floorplan_url = classification.floorplan.url
-            output.quality.floorplan = classification.floorplan.confidence
-            output.primary_reasoning.floorplan = f"PRE-SCAN ({classification.floorplan.confidence}): {classification.floorplan.reason}"
+            output.quality.floorplan = "strong"
+            output.primary_reasoning.floorplan = f"PRE-SCAN GEVALIDEERD: {classification.floorplan.reason} (jaar: {classification.floorplan.year_verified}, beurs: {classification.floorplan.fair_verified})"
 
-        if classification.exhibitor_manual and classification.exhibitor_manual.confidence in ['strong', 'partial']:
+        if classification.exhibitor_manual and classification.exhibitor_manual.confidence == 'strong':
             output.documents.exhibitor_manual_url = classification.exhibitor_manual.url
-            output.quality.exhibitor_manual = classification.exhibitor_manual.confidence
-            output.primary_reasoning.exhibitor_manual = f"PRE-SCAN ({classification.exhibitor_manual.confidence}): {classification.exhibitor_manual.reason}"
+            output.quality.exhibitor_manual = "strong"
+            output.primary_reasoning.exhibitor_manual = f"PRE-SCAN GEVALIDEERD: {classification.exhibitor_manual.reason} (jaar: {classification.exhibitor_manual.year_verified}, beurs: {classification.exhibitor_manual.fair_verified})"
 
-        if classification.rules and classification.rules.confidence in ['strong', 'partial']:
+        if classification.rules and classification.rules.confidence == 'strong':
             output.documents.rules_url = classification.rules.url
-            output.quality.rules = classification.rules.confidence
-            output.primary_reasoning.rules = f"PRE-SCAN ({classification.rules.confidence}): {classification.rules.reason}"
+            output.quality.rules = "strong"
+            output.primary_reasoning.rules = f"PRE-SCAN GEVALIDEERD: {classification.rules.reason} (jaar: {classification.rules.year_verified}, beurs: {classification.rules.fair_verified})"
 
-        if classification.schedule and classification.schedule.confidence in ['strong', 'partial']:
+        if classification.schedule and classification.schedule.confidence == 'strong':
             output.documents.schedule_page_url = classification.schedule.url
-            output.quality.schedule = classification.schedule.confidence
-            output.primary_reasoning.schedule = f"PRE-SCAN ({classification.schedule.confidence}): {classification.schedule.reason}"
+            output.quality.schedule = "strong"
+            output.primary_reasoning.schedule = f"PRE-SCAN GEVALIDEERD: {classification.schedule.reason}"
 
         if classification.exhibitor_directory:
             output.documents.exhibitor_directory_url = classification.exhibitor_directory
@@ -1872,27 +1862,75 @@ Kind regards,
                     output.documents.downloads_overview_url = page
                     break
 
-        # Add discovered emails to output
+        # Add extracted schedules from PDFs
+        if classification.aggregated_schedule:
+            for entry in classification.aggregated_schedule.build_up:
+                if entry.get('date'):
+                    output.schedule.build_up.append(ScheduleEntry(
+                        date=entry.get('date'),
+                        time=entry.get('time', ''),
+                        description=entry.get('description', 'Build-up'),
+                        source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
+                    ))
+            for entry in classification.aggregated_schedule.tear_down:
+                if entry.get('date'):
+                    output.schedule.tear_down.append(ScheduleEntry(
+                        date=entry.get('date'),
+                        time=entry.get('time', ''),
+                        description=entry.get('description', 'Tear-down'),
+                        source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
+                    ))
+            if output.schedule.build_up or output.schedule.tear_down:
+                output.quality.schedule = "strong"
+                output.primary_reasoning.schedule = f"PRE-SCAN: Schema geëxtraheerd uit PDF ({len(output.schedule.build_up)} opbouw, {len(output.schedule.tear_down)} afbouw entries)"
+                self._log(f"📅 Added schedule from PDF: {len(output.schedule.build_up)} build-up, {len(output.schedule.tear_down)} tear-down")
+
+        # Add extracted contacts from PDFs
+        if classification.aggregated_contacts:
+            for email in classification.aggregated_contacts.emails:
+                if email and '@' in email:
+                    output.contact_info.emails.append(ContactEmail(
+                        email=email,
+                        context=f"Extracted from PDF by LLM",
+                        source_url=classification.aggregated_contacts.source_url or ''
+                    ))
+            if classification.aggregated_contacts.organization:
+                output.contact_info.organization_name = classification.aggregated_contacts.organization
+            self._log(f"📧 Added contacts from PDF: {len(classification.aggregated_contacts.emails)} emails")
+
+        # Also add emails from pre-scan (webpage mailto links)
         if pre_scan_results.get('emails'):
             for email_data in pre_scan_results['emails']:
-                output.contact_info.emails.append(ContactEmail(
-                    email=email_data['email'],
-                    context=email_data.get('context', ''),
-                    source_url=email_data.get('source_url', '')
-                ))
-            self._log(f"Added {len(pre_scan_results['emails'])} contact emails to output")
+                # Avoid duplicates
+                existing_emails = [e.email for e in output.contact_info.emails]
+                if email_data['email'] not in existing_emails:
+                    output.contact_info.emails.append(ContactEmail(
+                        email=email_data['email'],
+                        context=email_data.get('context', ''),
+                        source_url=email_data.get('source_url', '')
+                    ))
+            self._log(f"Added {len(pre_scan_results['emails'])} contact emails from webpage")
 
         # Generate email draft if anything is still missing
         output.email_draft_if_missing = self._generate_email_draft(output, input_data)
 
         # Record debug info
         elapsed_time = int(time.time() - start_time)
+        strong_count = sum([
+            1 if classification.floorplan and classification.floorplan.confidence == 'strong' else 0,
+            1 if classification.exhibitor_manual and classification.exhibitor_manual.confidence == 'strong' else 0,
+            1 if classification.rules and classification.rules.confidence == 'strong' else 0,
+            1 if classification.schedule and classification.schedule.confidence == 'strong' else 0,
+            1 if classification.exhibitor_directory else 0,
+        ])
+
         output.debug.notes.append("🚀 SNELLE MODUS: Documenten gevonden via pre-scan + LLM classificatie")
-        output.debug.notes.append(f"Browser agent overgeslagen - {len(classification.found_types)}/5 documenten gevonden")
+        output.debug.notes.append(f"KWALITEITSCHECK: {strong_count}/5 documenten met STRONG confidence")
+        output.debug.notes.append(f"Browser agent overgeslagen - alle kritieke documenten gevalideerd")
         output.debug.notes.append(f"Totale tijd: {elapsed_time}s (vs ~5-7 minuten met browser agent)")
 
         if classification.missing_types:
-            output.debug.notes.append(f"Niet gevonden: {', '.join(classification.missing_types)}")
+            output.debug.notes.append(f"Niet gevonden (niet kritiek): {', '.join(classification.missing_types)}")
 
         self._log(f"✅ Output gebouwd uit pre-scan classificatie in {elapsed_time}s")
 
