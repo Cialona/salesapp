@@ -343,9 +343,14 @@ class ClaudeAgent:
                 except Exception:
                     continue
 
-            # Add verified subdomains to related domains
+            # Add verified subdomains to related domains AND exhibitor_pages
+            # This ensures the agent is explicitly told to visit these portals
             for subdomain in verified_subdomains:
-                related_domains.append(f"https://{subdomain}")
+                portal_url = f"https://{subdomain}"
+                related_domains.append(portal_url)
+                # Also add to exhibitor_pages so agent sees them in the instructions
+                if portal_url not in results['exhibitor_pages']:
+                    results['exhibitor_pages'].insert(0, portal_url)  # Add at start for priority
 
             if verified_subdomains:
                 self._log(f"  Found {len(verified_subdomains)} active exhibitor portal subdomains")
@@ -782,7 +787,12 @@ class ClaudeAgent:
                 if pre_scan_results['exhibitor_pages']:
                     pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
                     for page in pre_scan_results['exhibitor_pages'][:10]:
-                        pre_scan_info += f"  • {page}\n"
+                        # Highlight exhibitor portals (external subdomains)
+                        if 'exhibitor' in page.lower() and page not in input_data.known_url:
+                            pre_scan_info += f"  🌟 EXHIBITOR PORTAL: {page}\n"
+                        else:
+                            pre_scan_info += f"  • {page}\n"
+                    pre_scan_info += "\n⚠️ BELANGRIJK: Bezoek EERST de exhibitor portal(s) hierboven - daar staan vaak de beste documenten!"
 
             # PHASE 2: Launch browser for visual verification
             await self.browser.launch()
