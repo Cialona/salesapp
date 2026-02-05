@@ -232,7 +232,9 @@ class ClaudeAgent:
             stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
                          'il', 'la', 'le', 'del', 'della', 'di', 'fair', 'trade',
                          'show', 'exhibition', 'messe', 'fiera', 'salon', 'salone'}
-            significant_words = [w for w in words if w not in stop_words]
+
+            # Filter out years and numbers (e.g., "2026", "2025")
+            significant_words = [w for w in words if w not in stop_words and not w.isdigit()]
 
             # Abbreviation from first letters (e.g., "Seafood Expo Global" -> "seg")
             if len(significant_words) >= 2:
@@ -240,14 +242,24 @@ class ClaudeAgent:
                 abbreviations.append(abbrev)
 
             # First word if it's a distinctive name (e.g., "PROVADA" -> "provada")
-            if words:
-                first_word = words[0]
+            non_numeric_words = [w for w in words if not w.isdigit()]
+            if non_numeric_words:
+                first_word = non_numeric_words[0]
                 if len(first_word) >= 4:
                     abbreviations.append(first_word)
 
             # Combined form for two-word names (e.g., "EuroCucina" -> "eurocucina")
-            if len(words) == 1 and len(words[0]) >= 6:
-                abbreviations.append(words[0])
+            if len(non_numeric_words) == 1 and len(non_numeric_words[0]) >= 6:
+                abbreviations.append(non_numeric_words[0])
+
+            # === TRY COMMON VARIANTS ===
+            # If fair name contains 'expo' but no location qualifier, try adding 'global'
+            # Many fairs like "Seafood Expo" have portals at "exhibitors-seg.domain" (SEG = Seafood Expo Global)
+            if 'expo' in words and 'global' not in words:
+                variant_words = significant_words + ['global']
+                if len(variant_words) >= 2:
+                    abbrev_with_global = ''.join(w[0] for w in variant_words if w)
+                    abbreviations.append(abbrev_with_global)
 
             return list(set(abbreviations))  # Remove duplicates
 
@@ -331,9 +343,14 @@ class ClaudeAgent:
                 except Exception:
                     continue
 
-            # Add verified subdomains to related domains
+            # Add verified subdomains to related domains AND exhibitor_pages
+            # This ensures the agent is explicitly told to visit these portals
             for subdomain in verified_subdomains:
-                related_domains.append(f"https://{subdomain}")
+                portal_url = f"https://{subdomain}"
+                related_domains.append(portal_url)
+                # Also add to exhibitor_pages so agent sees them in the instructions
+                if portal_url not in results['exhibitor_pages']:
+                    results['exhibitor_pages'].insert(0, portal_url)  # Add at start for priority
 
             if verified_subdomains:
                 self._log(f"  Found {len(verified_subdomains)} active exhibitor portal subdomains")
@@ -770,7 +787,12 @@ class ClaudeAgent:
                 if pre_scan_results['exhibitor_pages']:
                     pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
                     for page in pre_scan_results['exhibitor_pages'][:10]:
-                        pre_scan_info += f"  • {page}\n"
+                        # Highlight exhibitor portals (external subdomains)
+                        if 'exhibitor' in page.lower() and page not in input_data.known_url:
+                            pre_scan_info += f"  🌟 EXHIBITOR PORTAL: {page}\n"
+                        else:
+                            pre_scan_info += f"  • {page}\n"
+                    pre_scan_info += "\n⚠️ BELANGRIJK: Bezoek EERST de exhibitor portal(s) hierboven - daar staan vaak de beste documenten!"
 
             # PHASE 2: Launch browser for visual verification
             await self.browser.launch()
