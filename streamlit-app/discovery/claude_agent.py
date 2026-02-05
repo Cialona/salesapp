@@ -19,6 +19,7 @@ from .schemas import (
     ScheduleEntry, ActionLogEntry, DownloadedFileInfo, output_to_dict,
     ContactEmail, ContactInfo
 )
+from .document_classifier import DocumentClassifier, ClassificationResult
 
 
 SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 99% van de gevraagde informatie te vinden.
@@ -963,9 +964,44 @@ class ClaudeAgent:
 
             pre_scan_results = None
             pre_scan_info = ""
+            classification_result = None
+            skip_browser_agent = False
 
             if input_data.known_url:
                 pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
+
+                # PHASE 1.5: Classify found documents with LLM
+                if pre_scan_results['pdf_links']:
+                    self._log("📋 Starting document classification with LLM...")
+                    classifier = DocumentClassifier(self.client, self._log)
+
+                    classification_result = await classifier.classify_documents(
+                        pdf_links=pre_scan_results['pdf_links'],
+                        fair_name=input_data.fair_name,
+                        target_year="2026",
+                        exhibitor_pages=pre_scan_results.get('exhibitor_pages', [])
+                    )
+
+                    # Decision: Can we skip the browser agent?
+                    # We need at least: floorplan, exhibitor_manual OR rules, exhibitor_directory
+                    critical_found = sum([
+                        1 if classification_result.floorplan and classification_result.floorplan.confidence in ['strong', 'partial'] else 0,
+                        1 if classification_result.exhibitor_manual and classification_result.exhibitor_manual.confidence in ['strong', 'partial'] else 0,
+                        1 if classification_result.rules and classification_result.rules.confidence in ['strong', 'partial'] else 0,
+                        1 if classification_result.exhibitor_directory else 0,
+                    ])
+
+                    if critical_found >= 3:
+                        # We have enough documents - can potentially skip agent
+                        self._log(f"✅ Classificatie: {critical_found}/4 kritieke documenten gevonden via prescan!")
+
+                        if classification_result.all_found:
+                            self._log("🎉 ALLE documenten gevonden! Browser agent wordt overgeslagen.")
+                            skip_browser_agent = True
+                        else:
+                            self._log(f"⚠️ Nog missend: {', '.join(classification_result.missing_types)}")
+                    else:
+                        self._log(f"🔍 Slechts {critical_found}/4 kritieke documenten - browser agent nodig")
 
                 # Format pre-scan results for the agent
                 if pre_scan_results['pdf_links']:
@@ -1028,6 +1064,14 @@ class ClaudeAgent:
                             pre_scan_info += f"  • {page}\n"
                     pre_scan_info += "\n⚠️ BELANGRIJK: Bezoek EERST de exhibitor portal(s) hierboven - daar staan vaak de beste documenten!"
 
+            # EARLY RETURN: If classification found enough documents, skip browser agent
+            if skip_browser_agent and classification_result:
+                self._log("🚀 Building output from pre-scan classification (skipping browser agent)...")
+                output = self._build_output_from_classification(
+                    classification_result, output, input_data, pre_scan_results, start_time
+                )
+                return output
+
             # PHASE 2: Launch browser for visual verification
             await self.browser.launch()
             self._log("Browser launched")
@@ -1036,15 +1080,39 @@ class ClaudeAgent:
             self._log(f"Navigated to: {start_url}")
 
             # Build initial message with pre-scan results
+            # If we have classification results, add focused instructions
+            classification_info = ""
+            reduced_iterations = False
+
+            if classification_result and classification_result.found_types:
+                # Some documents found - tell agent what's already done
+                classification_info = "\n\n" + "=" * 60 + "\n"
+                classification_info += "🎯 PRE-SCAN CLASSIFICATIE RESULTATEN:\n"
+                classification_info += "=" * 60 + "\n"
+                classification_info += classification_result.get_found_prompt_section()
+                classification_info += "\n\n"
+                classification_info += classification_result.get_missing_prompt_section()
+                classification_info += "\n" + "=" * 60
+
+                # Reduce max iterations when we only need to find a few things
+                if len(classification_result.missing_types) <= 2:
+                    reduced_iterations = True
+                    self._log(f"📉 Verlaagde iteraties: slechts {len(classification_result.missing_types)} documenten te vinden")
+
             user_message = f"""
 Vind informatie voor de beurs: {input_data.fair_name}
 {f'Stad: {input_data.city}' if input_data.city else ''}
 {f'Land: {input_data.country}' if input_data.country else ''}
 {f'Start URL: {input_data.known_url}' if input_data.known_url else ''}
+{classification_info}
 {pre_scan_info}
 
-{'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] else 'Navigeer door de website en vind alle gevraagde documenten.'}
+{'BELANGRIJK: Focus ALLEEN op de missende documenten! De andere zijn al gevalideerd.' if classification_result and classification_result.missing_types else ''}
+{'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] and not classification_result else 'Navigeer door de website en vind alle gevraagde documenten.'}
 """
+
+            # Reduce iterations if we only need a few more documents
+            effective_max_iterations = 15 if reduced_iterations else self.max_iterations
 
             # Get initial screenshot
             screenshot = await self.browser.screenshot()
@@ -1074,9 +1142,9 @@ Vind informatie voor de beurs: {input_data.fair_name}
             done = False
             final_result = None
 
-            while not done and iteration < self.max_iterations:
+            while not done and iteration < effective_max_iterations:
                 iteration += 1
-                self._log(f"Iteration {iteration}/{self.max_iterations}")
+                self._log(f"Iteration {iteration}/{effective_max_iterations}")
 
                 # Mid-point check - encourage deeper exploration
                 if iteration == 20:
@@ -1254,6 +1322,32 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 
                 # Auto-map downloads to document fields based on filename
                 self._auto_map_download(download, output)
+
+            # Merge classification results with agent results (classification as fallback)
+            if classification_result:
+                # Only use classification result if agent didn't find it
+                if not output.documents.floorplan_url and classification_result.floorplan:
+                    if classification_result.floorplan.confidence in ['strong', 'partial']:
+                        output.documents.floorplan_url = classification_result.floorplan.url
+                        output.quality.floorplan = classification_result.floorplan.confidence
+                        output.primary_reasoning.floorplan = f"PRE-SCAN: {classification_result.floorplan.reason}"
+
+                if not output.documents.exhibitor_manual_url and classification_result.exhibitor_manual:
+                    if classification_result.exhibitor_manual.confidence in ['strong', 'partial']:
+                        output.documents.exhibitor_manual_url = classification_result.exhibitor_manual.url
+                        output.quality.exhibitor_manual = classification_result.exhibitor_manual.confidence
+                        output.primary_reasoning.exhibitor_manual = f"PRE-SCAN: {classification_result.exhibitor_manual.reason}"
+
+                if not output.documents.rules_url and classification_result.rules:
+                    if classification_result.rules.confidence in ['strong', 'partial']:
+                        output.documents.rules_url = classification_result.rules.url
+                        output.quality.rules = classification_result.rules.confidence
+                        output.primary_reasoning.rules = f"PRE-SCAN: {classification_result.rules.reason}"
+
+                if not output.documents.exhibitor_directory_url and classification_result.exhibitor_directory:
+                    output.documents.exhibitor_directory_url = classification_result.exhibitor_directory
+                    output.quality.exhibitor_directory = "strong"
+                    output.primary_reasoning.exhibitor_directory = "PRE-SCAN: Exhibitor directory page"
 
             output.debug.notes.append(f"Agent completed in {iteration} iterations")
             output.debug.notes.append(f"Auto-mapped {len(downloads)} downloaded files to output fields")
@@ -1726,6 +1820,83 @@ Kind regards,
 === DRAFT EMAIL (ENGLISH) ===
 
 {english_email}"""
+
+    def _build_output_from_classification(
+        self,
+        classification: ClassificationResult,
+        output: DiscoveryOutput,
+        input_data: TestCaseInput,
+        pre_scan_results: dict,
+        start_time: float
+    ) -> DiscoveryOutput:
+        """
+        Build output directly from classification results (no browser agent needed).
+        This is used when the prescan + classification found all required documents.
+        """
+        # Set official URL/domain
+        if input_data.known_url:
+            output.official_url = input_data.known_url
+            output.official_domain = urlparse(input_data.known_url).netloc
+
+        # Map classified documents to output
+        if classification.floorplan and classification.floorplan.confidence in ['strong', 'partial']:
+            output.documents.floorplan_url = classification.floorplan.url
+            output.quality.floorplan = classification.floorplan.confidence
+            output.primary_reasoning.floorplan = f"PRE-SCAN ({classification.floorplan.confidence}): {classification.floorplan.reason}"
+
+        if classification.exhibitor_manual and classification.exhibitor_manual.confidence in ['strong', 'partial']:
+            output.documents.exhibitor_manual_url = classification.exhibitor_manual.url
+            output.quality.exhibitor_manual = classification.exhibitor_manual.confidence
+            output.primary_reasoning.exhibitor_manual = f"PRE-SCAN ({classification.exhibitor_manual.confidence}): {classification.exhibitor_manual.reason}"
+
+        if classification.rules and classification.rules.confidence in ['strong', 'partial']:
+            output.documents.rules_url = classification.rules.url
+            output.quality.rules = classification.rules.confidence
+            output.primary_reasoning.rules = f"PRE-SCAN ({classification.rules.confidence}): {classification.rules.reason}"
+
+        if classification.schedule and classification.schedule.confidence in ['strong', 'partial']:
+            output.documents.schedule_page_url = classification.schedule.url
+            output.quality.schedule = classification.schedule.confidence
+            output.primary_reasoning.schedule = f"PRE-SCAN ({classification.schedule.confidence}): {classification.schedule.reason}"
+
+        if classification.exhibitor_directory:
+            output.documents.exhibitor_directory_url = classification.exhibitor_directory
+            output.quality.exhibitor_directory = "strong"
+            output.primary_reasoning.exhibitor_directory = "PRE-SCAN: Exhibitor directory page gevonden"
+
+        # Add any downloads page from pre-scan
+        if pre_scan_results.get('exhibitor_pages'):
+            for page in pre_scan_results['exhibitor_pages']:
+                page_lower = page.lower()
+                if any(kw in page_lower for kw in ['download', 'document', 'resource']):
+                    output.documents.downloads_overview_url = page
+                    break
+
+        # Add discovered emails to output
+        if pre_scan_results.get('emails'):
+            for email_data in pre_scan_results['emails']:
+                output.contact_info.emails.append(ContactEmail(
+                    email=email_data['email'],
+                    context=email_data.get('context', ''),
+                    source_url=email_data.get('source_url', '')
+                ))
+            self._log(f"Added {len(pre_scan_results['emails'])} contact emails to output")
+
+        # Generate email draft if anything is still missing
+        output.email_draft_if_missing = self._generate_email_draft(output, input_data)
+
+        # Record debug info
+        elapsed_time = int(time.time() - start_time)
+        output.debug.notes.append("🚀 SNELLE MODUS: Documenten gevonden via pre-scan + LLM classificatie")
+        output.debug.notes.append(f"Browser agent overgeslagen - {len(classification.found_types)}/5 documenten gevonden")
+        output.debug.notes.append(f"Totale tijd: {elapsed_time}s (vs ~5-7 minuten met browser agent)")
+
+        if classification.missing_types:
+            output.debug.notes.append(f"Niet gevonden: {', '.join(classification.missing_types)}")
+
+        self._log(f"✅ Output gebouwd uit pre-scan classificatie in {elapsed_time}s")
+
+        return output
 
 
 async def run_discovery(
