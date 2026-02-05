@@ -109,7 +109,7 @@ with col_act4:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # Main content tabs
-tab_docs, tab_schedule, tab_raw = st.tabs(["📄 Documenten", "📅 Schema", "🔧 Raw Data"])
+tab_docs, tab_schedule, tab_contact, tab_raw = st.tabs(["📄 Documenten", "📅 Schema", "📧 Contact & Email", "🔧 Raw Data"])
 
 with tab_docs:
     st.markdown("### Gevonden Documenten")
@@ -235,6 +235,67 @@ with tab_schedule:
                     """, unsafe_allow_html=True)
             else:
                 st.write("Geen afbouw data")
+
+with tab_contact:
+    st.markdown("### 📧 Contact Informatie & Email")
+
+    # Get contact info and email draft from discovery output
+    discovery_output = fair.get('discovery_output', {})
+    contact_info = discovery_output.get('contact_info', {})
+    email_draft = discovery_output.get('email_draft_if_missing')
+
+    # Show discovered emails
+    emails = contact_info.get('emails', [])
+    if emails:
+        st.markdown("#### 📬 Gevonden Emailadressen")
+        for email_data in emails:
+            email = email_data.get('email', '')
+            context = email_data.get('context', '')
+            source = email_data.get('source_url', '')
+
+            col_email, col_action = st.columns([3, 1])
+            with col_email:
+                st.markdown(f"""
+                <div style="background: #F0F9FF; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;
+                            border: 1px solid #BAE6FD;">
+                    <strong style="color: #0369A1;">📧 {email}</strong>
+                    {f'<br><span style="color: #6B7280; font-size: 0.8rem;">{context[:50]}...</span>' if context else ''}
+                </div>
+                """, unsafe_allow_html=True)
+            with col_action:
+                st.link_button("✉️ Mail", f"mailto:{email}", use_container_width=True)
+    else:
+        st.info("Geen emailadressen gevonden tijdens de discovery.")
+
+    st.markdown("---")
+
+    # Show email draft if documents are missing
+    if email_draft:
+        st.markdown("#### ✉️ Concept Email voor Ontbrekende Documenten")
+        st.warning("Onderstaande email is automatisch gegenereerd op basis van ontbrekende documenten.")
+
+        # Split into Dutch and English sections
+        if "=== CONCEPT EMAIL (NEDERLANDS) ===" in email_draft:
+            parts = email_draft.split("=== DRAFT EMAIL (ENGLISH) ===")
+            dutch_part = parts[0].replace("=== CONCEPT EMAIL (NEDERLANDS) ===", "").strip()
+            english_part = parts[1].strip() if len(parts) > 1 else ""
+
+            tab_nl, tab_en = st.tabs(["🇳🇱 Nederlands", "🇬🇧 English"])
+
+            with tab_nl:
+                st.text_area("Concept Email (NL)", dutch_part, height=350, key="email_nl")
+                st.button("📋 Kopieer naar klembord", key="copy_nl", help="Selecteer de tekst hierboven en kopieer met Ctrl+C")
+
+            with tab_en:
+                st.text_area("Draft Email (EN)", english_part, height=350, key="email_en")
+                st.button("📋 Copy to clipboard", key="copy_en", help="Select the text above and copy with Ctrl+C")
+        else:
+            st.text_area("Email Draft", email_draft, height=400)
+    else:
+        if fair.get('status') == 'complete':
+            st.success("✅ Alle documenten zijn gevonden - geen email nodig!")
+        else:
+            st.info("Geen concept email beschikbaar. Start een nieuwe discovery om een email te genereren.")
 
 with tab_raw:
     st.markdown("### Raw Discovery Data")
