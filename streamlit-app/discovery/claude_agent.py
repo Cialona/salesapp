@@ -186,10 +186,11 @@ class ClaudeAgent:
             print(message)
         self.on_status(message)
 
-    async def _pre_scan_website(self, base_url: str) -> Dict[str, Any]:
+    async def _pre_scan_website(self, base_url: str, fair_name: str = "") -> Dict[str, Any]:
         """
         Pre-scan the website using Playwright to find documents.
         Uses a real browser with JavaScript execution to find dynamically loaded content.
+        Also searches the web to discover exhibitor portals that may not be linked.
         This runs BEFORE the main Computer Use loop to find documents that might be hidden.
         """
         self._log("🔎 Pre-scanning website with Playwright (JavaScript enabled)...")
@@ -212,9 +213,56 @@ class ClaudeAgent:
         # URLs to try scanning
         urls_to_scan = [base_url]
 
+        # === WEB SEARCH FOR EXHIBITOR PORTALS ===
+        # Search the web to discover exhibitor portals that may not be linked from main site
+        discovered_portals = []
+        if fair_name:
+            self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
+            search_browser = BrowserController(800, 600)
+            try:
+                await search_browser.launch()
+
+                # Search queries to find exhibitor portals
+                search_queries = [
+                    f"{fair_name} exhibitor portal",
+                    f"{fair_name} exhibitor services login",
+                ]
+
+                for query in search_queries[:1]:  # Limit to 1 search to save time
+                    try:
+                        search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+                        await search_browser.goto(search_url)
+                        await asyncio.sleep(1)
+
+                        # Extract links from search results
+                        search_links = await search_browser.extract_links()
+
+                        for link in search_links:
+                            link_host = urlparse(link.url).netloc.lower()
+
+                            # Look for exhibitor portal domains in search results
+                            if any(kw in link_host for kw in ['exhibitor', 'aussteller', 'espositori', 'portal']):
+                                # Skip Google's own domains
+                                if 'google' not in link_host and 'gstatic' not in link_host:
+                                    portal_base = f"https://{link_host}"
+                                    if portal_base not in discovered_portals:
+                                        discovered_portals.append(portal_base)
+                                        self._log(f"    🌐 Web search found portal: {link_host}")
+                    except Exception as e:
+                        self._log(f"    Search error: {e}")
+                        continue
+
+            except Exception as e:
+                self._log(f"Web search error: {e}")
+            finally:
+                await search_browser.close()
+
         # === DETECT RELATED DOMAINS ===
         # Many fairs have exhibitor portals on separate subdomains
         related_domains = []
+
+        # Add discovered portals from web search
+        related_domains.extend(discovered_portals)
 
         # Extract root domain (e.g., fieramilano.it from salonemilano.it)
         domain_parts = base_netloc.split('.')
@@ -616,7 +664,7 @@ class ClaudeAgent:
             pre_scan_info = ""
 
             if input_data.known_url:
-                pre_scan_results = await self._pre_scan_website(input_data.known_url)
+                pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
 
                 # Format pre-scan results for the agent
                 if pre_scan_results['pdf_links']:
