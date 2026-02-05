@@ -228,9 +228,9 @@ class ClaudeAgent:
             clean_name = name.lower().strip()
             words = clean_name.replace('-', ' ').replace('_', ' ').split()
 
-            # Filter out common words
+            # Filter out common words (but keep 'expo' as it's often part of fair names like SEG)
             stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
-                         'il', 'la', 'le', 'del', 'della', 'di', 'expo', 'fair', 'trade',
+                         'il', 'la', 'le', 'del', 'della', 'di', 'fair', 'trade',
                          'show', 'exhibition', 'messe', 'fiera', 'salon', 'salone'}
             significant_words = [w for w in words if w not in stop_words]
 
@@ -308,20 +308,25 @@ class ClaudeAgent:
                 ])
 
             # === VERIFY SUBDOMAINS EXIST ===
-            # Quick check which subdomains actually respond
+            # Quick HTTP HEAD check to see which subdomains respond
+            # (DNS lookups aren't reliable - some sites use CDNs/proxies that don't resolve directly)
+            import urllib.request
+            import urllib.error
             verified_subdomains = []
 
             self._log(f"  Checking {len(exhibitor_subdomains)} potential exhibitor portal subdomains...")
 
             for subdomain in exhibitor_subdomains:
                 try:
-                    # Quick DNS check (much faster than HTTP request)
-                    socket.setdefaulttimeout(1)
-                    socket.gethostbyname(subdomain)
-                    verified_subdomains.append(subdomain)
-                    self._log(f"    ✓ Found active subdomain: {subdomain}")
-                except (socket.gaierror, socket.timeout):
-                    # Domain doesn't exist or timeout - skip
+                    url = f"https://{subdomain}"
+                    req = urllib.request.Request(url, method='HEAD')
+                    req.add_header('User-Agent', 'Mozilla/5.0 (compatible; TradeFairBot/1.0)')
+                    with urllib.request.urlopen(req, timeout=3) as response:
+                        if response.status < 400:
+                            verified_subdomains.append(subdomain)
+                            self._log(f"    ✓ Found active portal: {subdomain}")
+                except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
+                    # Site doesn't exist or isn't accessible - skip
                     continue
                 except Exception:
                     continue
