@@ -1447,15 +1447,24 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 
         fair_name = input_data.fair_name
         city = input_data.city or ""
+        client_name = input_data.client_name or ""
+
+        # Build client context for the email
+        if client_name:
+            dutch_client_context = f"Wij zijn de standbouwer voor {client_name} en bereiden ons voor op {fair_name}{f' in {city}' if city else ''}."
+            english_client_context = f"We are the stand construction company for {client_name}, preparing for {fair_name}{f' in {city}' if city else ''}."
+        else:
+            dutch_client_context = f"Wij zijn een standbouwbedrijf en bereiden ons voor op {fair_name}{f' in {city}' if city else ''}."
+            english_client_context = f"We are a stand construction company preparing for {fair_name}{f' in {city}' if city else ''}."
 
         # Generate Dutch version
-        dutch_email = f"""Onderwerp: Informatieverzoek standbouw {fair_name}
+        dutch_email = f"""Onderwerp: Informatieverzoek standbouw {fair_name}{f' - {client_name}' if client_name else ''}
 
 Geachte heer/mevrouw,
 
-Wij zijn een standbouwbedrijf en bereiden ons voor op {fair_name}{f' in {city}' if city else ''}.
+{dutch_client_context}
 
-Voor de voorbereiding van de standbouw voor onze klanten hebben wij de volgende documenten/informatie nodig die wij niet op uw website hebben kunnen vinden:
+Voor de voorbereiding van de standbouw hebben wij de volgende documenten/informatie nodig die wij niet op uw website hebben kunnen vinden:
 
 {chr(10).join(f'• {item}' for item in missing_items)}
 
@@ -1470,13 +1479,13 @@ Met vriendelijke groet,
 [Contactgegevens]"""
 
         # Generate English version
-        english_email = f"""Subject: Information request for stand construction at {fair_name}
+        english_email = f"""Subject: Information request for stand construction at {fair_name}{f' - {client_name}' if client_name else ''}
 
 Dear Sir/Madam,
 
-We are a stand construction company preparing for {fair_name}{f' in {city}' if city else ''}.
+{english_client_context}
 
-For the preparation of stand construction for our clients, we require the following documents/information which we could not find on your website:
+For the preparation of the stand construction, we require the following documents/information which we could not find on your website:
 
 {chr(10).join(f'• {item}' for item in missing_items_en)}
 
@@ -1505,6 +1514,7 @@ async def run_discovery(
     known_url: Optional[str] = None,
     city: Optional[str] = None,
     country: Optional[str] = None,
+    client_name: Optional[str] = None,
     api_key: Optional[str] = None,
     on_status: Optional[Callable[[str], None]] = None
 ) -> Dict[str, Any]:
@@ -1512,12 +1522,22 @@ async def run_discovery(
     Run a discovery and return the result as a dictionary.
 
     This is the main entry point for the Streamlit app.
+
+    Args:
+        fair_name: Name of the trade fair
+        known_url: Known URL of the fair website
+        city: City where the fair takes place
+        country: Country where the fair takes place
+        client_name: Name of the client we're building a stand for (used in email draft)
+        api_key: Anthropic API key
+        on_status: Callback function for status updates
     """
     input_data = TestCaseInput(
         fair_name=fair_name,
         known_url=known_url,
         city=city,
-        country=country
+        country=country,
+        client_name=client_name
     )
 
     agent = ClaudeAgent(

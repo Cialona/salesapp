@@ -13,6 +13,7 @@ class TestCaseInput:
     known_url: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
+    client_name: Optional[str] = None  # Name of the client we're building a stand for
 
 
 @dataclass
