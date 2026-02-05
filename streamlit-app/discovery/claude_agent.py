@@ -353,7 +353,14 @@ class ClaudeAgent:
                             elif any(kw in lower_url or kw in lower_text for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'smm_', 'manual', 'handbook', 'handbuch']):
                                 doc_type = 'exhibitor_manual'
                             elif any(kw in lower_url or kw in lower_text for kw in ['floor', 'plan', 'hall', 'gelaende', 'site', 'map', 'layout']):
-                                doc_type = 'floorplan'
+                                # Exclude documents that aren't actual floor plans
+                                is_not_floorplan = any(excl in lower_url or excl in lower_text for excl in [
+                                    'technical', 'data sheet', 'datasheet', 'evacuation', 'emergency',
+                                    'safety', 'regulation', 'provision', 'guideline', 'specification',
+                                    'spec', 'elettric', 'electric', 'water', 'gas', 'service'
+                                ])
+                                if not is_not_floorplan:
+                                    doc_type = 'floorplan'
                             elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar', 'abbau', 'dismant']):
                                 doc_type = 'schedule'
 
@@ -495,7 +502,14 @@ class ClaudeAgent:
                             elif any(kw in lower_url or kw in lower_text for kw in ['provision', 'stand', 'design', 'fitting', 'allestimento', 'manual', 'handbook']):
                                 doc_type = 'exhibitor_manual'
                             elif any(kw in lower_url or kw in lower_text for kw in ['floor', 'plan', 'hall', 'gelaende']):
-                                doc_type = 'floorplan'
+                                # Exclude documents that aren't actual floor plans
+                                is_not_floorplan = any(excl in lower_url or excl in lower_text for excl in [
+                                    'technical', 'data sheet', 'datasheet', 'evacuation', 'emergency',
+                                    'safety', 'regulation', 'provision', 'guideline', 'specification',
+                                    'spec', 'elettric', 'electric', 'water', 'gas', 'service'
+                                ])
+                                if not is_not_floorplan:
+                                    doc_type = 'floorplan'
                             elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio']):
                                 doc_type = 'schedule'
 
