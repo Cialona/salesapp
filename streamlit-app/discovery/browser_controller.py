@@ -41,6 +41,14 @@ class LinkInfo:
     is_pdf: bool = False
 
 
+@dataclass
+class ExtractedEmail:
+    """Email address extracted from a page with context."""
+    email: str
+    context: str = ""  # Surrounding text or link text
+    source_type: str = ""  # 'mailto', 'text', 'contact_page'
+
+
 class BrowserController:
     """Controls a headless browser for Claude Computer Use."""
 
@@ -443,3 +451,111 @@ class BrowserController:
             'high_value_links': high_value_links,
             'all_links': all_links
         }
+
+    async def extract_emails(self) -> List[ExtractedEmail]:
+        """Extract email addresses from the current page."""
+        import re
+
+        if not self._page:
+            return []
+
+        emails_found = []
+        seen_emails = set()
+
+        # Email regex pattern
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+
+        try:
+            # Method 1: Extract from mailto: links
+            mailto_links = await self._page.evaluate("""
+                () => {
+                    const links = document.querySelectorAll('a[href^="mailto:"]');
+                    return Array.from(links).map(link => ({
+                        email: link.href.replace('mailto:', '').split('?')[0],
+                        context: link.innerText || link.title || ''
+                    }));
+                }
+            """)
+
+            for item in mailto_links:
+                email = item['email'].lower().strip()
+                if email and email not in seen_emails and '@' in email:
+                    seen_emails.add(email)
+                    emails_found.append(ExtractedEmail(
+                        email=email,
+                        context=item['context'][:100] if item['context'] else '',
+                        source_type='mailto'
+                    ))
+
+            # Method 2: Extract from page text content
+            page_text = await self._page.evaluate("() => document.body.innerText")
+            text_emails = re.findall(email_pattern, page_text)
+
+            for email in text_emails:
+                email_lower = email.lower()
+                if email_lower not in seen_emails:
+                    # Try to find context around the email
+                    context = ""
+                    idx = page_text.lower().find(email_lower)
+                    if idx != -1:
+                        start = max(0, idx - 50)
+                        end = min(len(page_text), idx + len(email) + 50)
+                        context = page_text[start:end].strip()
+
+                    seen_emails.add(email_lower)
+                    emails_found.append(ExtractedEmail(
+                        email=email_lower,
+                        context=context[:100] if context else '',
+                        source_type='text'
+                    ))
+
+            # Method 3: Look for contact-related elements
+            contact_emails = await self._page.evaluate("""
+                () => {
+                    const emailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g;
+                    const results = [];
+
+                    // Look in elements that typically contain contact info
+                    const selectors = [
+                        '.contact', '#contact', '[class*="contact"]',
+                        '.footer', '#footer', 'footer',
+                        '.email', '[class*="email"]',
+                        'address', '[itemtype*="ContactPoint"]'
+                    ];
+
+                    selectors.forEach(selector => {
+                        try {
+                            const elements = document.querySelectorAll(selector);
+                            elements.forEach(el => {
+                                const text = el.innerText || '';
+                                const matches = text.match(emailPattern);
+                                if (matches) {
+                                    matches.forEach(email => {
+                                        results.push({
+                                            email: email,
+                                            context: selector
+                                        });
+                                    });
+                                }
+                            });
+                        } catch(e) {}
+                    });
+
+                    return results;
+                }
+            """)
+
+            for item in contact_emails:
+                email = item['email'].lower()
+                if email not in seen_emails:
+                    seen_emails.add(email)
+                    emails_found.append(ExtractedEmail(
+                        email=email,
+                        context=item['context'],
+                        source_type='contact_page'
+                    ))
+
+        except Exception as e:
+            print(f"Error extracting emails: {e}")
+
+        return emails_found

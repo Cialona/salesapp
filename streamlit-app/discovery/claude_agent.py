@@ -16,7 +16,8 @@ import anthropic
 from .browser_controller import BrowserController, DownloadedFile
 from .schemas import (
     DiscoveryOutput, TestCaseInput, create_empty_output,
-    ScheduleEntry, ActionLogEntry, DownloadedFileInfo, output_to_dict
+    ScheduleEntry, ActionLogEntry, DownloadedFileInfo, output_to_dict,
+    ContactEmail, ContactInfo
 )
 
 
@@ -200,7 +201,8 @@ class ClaudeAgent:
             'pdf_links': [],
             'document_pages': [],
             'exhibitor_pages': [],
-            'all_links': []
+            'all_links': [],
+            'emails': []  # Discovered email addresses
         }
 
         parsed_base = urlparse(base_url)
@@ -447,6 +449,19 @@ class ClaudeAgent:
 
                     # Get all links (this expands accordions and extracts with JS)
                     relevant_links = await pre_scan_browser.get_relevant_links()
+
+                    # Extract email addresses from this page
+                    page_emails = await pre_scan_browser.extract_emails()
+                    for email_info in page_emails:
+                        # Avoid duplicates
+                        if email_info.email not in [e['email'] for e in results['emails']]:
+                            results['emails'].append({
+                                'email': email_info.email,
+                                'context': email_info.context,
+                                'source_type': email_info.source_type,
+                                'source_url': url
+                            })
+                            self._log(f"    📧 Found email: {email_info.email}")
 
                     # Process PDF links
                     for link in relevant_links.get('pdf_links', []):
@@ -1025,6 +1040,19 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             output.debug.notes.append(f"Auto-mapped {len(downloads)} downloaded files to output fields")
             output.debug.notes.append(f"Total time: {int(time.time() - start_time)}s")
 
+            # Add discovered emails to output
+            if pre_scan_results and pre_scan_results.get('emails'):
+                for email_data in pre_scan_results['emails']:
+                    output.contact_info.emails.append(ContactEmail(
+                        email=email_data['email'],
+                        context=email_data.get('context', ''),
+                        source_url=email_data.get('source_url', '')
+                    ))
+                self._log(f"Added {len(pre_scan_results['emails'])} contact emails to output")
+
+            # Generate email draft if documents are missing
+            output.email_draft_if_missing = self._generate_email_draft(output, input_data)
+
         except Exception as e:
             error_msg = str(e)
             output.debug.notes.append(f"Error: {error_msg}")
@@ -1387,6 +1415,89 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 
         except json.JSONDecodeError as e:
             output.debug.notes.append(f"JSON parse error: {e}")
+
+    def _generate_email_draft(self, output: DiscoveryOutput, input_data: TestCaseInput) -> Optional[str]:
+        """
+        Generate an email draft requesting missing documents.
+        Returns None if all documents are found.
+        """
+        # Determine what's missing
+        missing_items = []
+        missing_items_en = []
+
+        if output.quality.floorplan == "missing":
+            missing_items.append("plattegrond/hallenplan")
+            missing_items_en.append("floor plan / hall plan")
+
+        if output.quality.exhibitor_manual == "missing":
+            missing_items.append("exposanten handleiding/manual")
+            missing_items_en.append("exhibitor manual / handbook")
+
+        if output.quality.rules == "missing":
+            missing_items.append("technische richtlijnen/voorschriften")
+            missing_items_en.append("technical guidelines / regulations")
+
+        if output.quality.schedule == "missing":
+            missing_items.append("opbouw- en afbouwschema met tijden")
+            missing_items_en.append("build-up and tear-down schedule with times")
+
+        # If nothing is missing, no need for an email
+        if not missing_items:
+            return None
+
+        fair_name = input_data.fair_name
+        city = input_data.city or ""
+
+        # Generate Dutch version
+        dutch_email = f"""Onderwerp: Informatieverzoek standbouw {fair_name}
+
+Geachte heer/mevrouw,
+
+Wij zijn een standbouwbedrijf en bereiden ons voor op {fair_name}{f' in {city}' if city else ''}.
+
+Voor de voorbereiding van de standbouw voor onze klanten hebben wij de volgende documenten/informatie nodig die wij niet op uw website hebben kunnen vinden:
+
+{chr(10).join(f'• {item}' for item in missing_items)}
+
+Zou u ons deze informatie kunnen toesturen of kunnen aangeven waar wij deze kunnen vinden?
+
+Bij voorbaat dank voor uw medewerking.
+
+Met vriendelijke groet,
+
+[Uw naam]
+[Bedrijfsnaam]
+[Contactgegevens]"""
+
+        # Generate English version
+        english_email = f"""Subject: Information request for stand construction at {fair_name}
+
+Dear Sir/Madam,
+
+We are a stand construction company preparing for {fair_name}{f' in {city}' if city else ''}.
+
+For the preparation of stand construction for our clients, we require the following documents/information which we could not find on your website:
+
+{chr(10).join(f'• {item}' for item in missing_items_en)}
+
+Could you please send us this information or indicate where we can find it?
+
+Thank you in advance for your cooperation.
+
+Kind regards,
+
+[Your name]
+[Company name]
+[Contact details]"""
+
+        # Return both versions
+        return f"""=== CONCEPT EMAIL (NEDERLANDS) ===
+
+{dutch_email}
+
+=== DRAFT EMAIL (ENGLISH) ===
+
+{english_email}"""
 
 
 async def run_discovery(
