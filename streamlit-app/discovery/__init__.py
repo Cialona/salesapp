@@ -6,6 +6,13 @@ Python implementation of the Claude Computer Use agent.
 from .browser_controller import BrowserController
 from .claude_agent import ClaudeAgent
 from .schemas import DiscoveryOutput, TestCaseInput, create_empty_output
+from .document_classifier import (
+    DocumentClassifier,
+    ClassificationResult,
+    DocumentClassification,
+    ExtractedSchedule,
+    ExtractedContact
+)
 
 __all__ = [
     'BrowserController',
@@ -13,4 +20,9 @@ __all__ = [
     'DiscoveryOutput',
     'TestCaseInput',
     'create_empty_output',
+    'DocumentClassifier',
+    'ClassificationResult',
+    'DocumentClassification',
+    'ExtractedSchedule',
+    'ExtractedContact',
 ]

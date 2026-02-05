@@ -19,6 +19,7 @@ from .schemas import (
     ScheduleEntry, ActionLogEntry, DownloadedFileInfo, output_to_dict,
     ContactEmail, ContactInfo
 )
+from .document_classifier import DocumentClassifier, ClassificationResult
 
 
 SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 99% van de gevraagde informatie te vinden.
@@ -376,13 +377,43 @@ class ClaudeAgent:
         # Search the web to find exhibitor manuals/portals that may not be linked from main site
         if fair_name:
             self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
-            web_search_urls = await self._web_search_for_portals(fair_name)
-            for url in web_search_urls:
-                if url not in results['exhibitor_pages']:
-                    results['exhibitor_pages'].insert(0, url)
-                if url not in urls_to_scan:
-                    urls_to_scan.insert(1, url)  # Add right after base URL
-                    self._log(f"    🌐 Web search found: {url}")
+            web_search_results = await self._web_search_for_portals(fair_name)
+
+            # Add found PDFs directly to pdf_links (these are high-value direct downloads)
+            for pdf_url in web_search_results.get('pdf_links', []):
+                existing_urls = [p['url'] if isinstance(p, dict) else p for p in results['pdf_links']]
+                if pdf_url not in existing_urls:
+                    # Determine type from URL
+                    url_lower = pdf_url.lower()
+                    if 'welcome' in url_lower or 'exhibitor' in url_lower or 'manual' in url_lower:
+                        pdf_type = 'exhibitor_manual'
+                    elif 'technical' in url_lower or 'regulation' in url_lower or 'guideline' in url_lower:
+                        pdf_type = 'technical_guidelines'
+                    elif 'floor' in url_lower or 'map' in url_lower or 'plan' in url_lower:
+                        pdf_type = 'floorplan'
+                    else:
+                        pdf_type = 'unknown'
+
+                    # Extract year from URL if present
+                    year_match = re.search(r'20(2[4-9]|3[0-9])', pdf_url)
+                    pdf_year = f"20{year_match.group(1)}" if year_match else None
+
+                    # Add as dict format consistent with other pdf_links
+                    results['pdf_links'].insert(0, {
+                        'url': pdf_url,
+                        'text': f"Web search: {pdf_url.split('/')[-1]}",
+                        'type': pdf_type,
+                        'year': pdf_year
+                    })
+                    self._log(f"    📥 Web search PDF ({pdf_type}): {pdf_url[:60]}...")
+
+            # Add found portals to exhibitor_pages and urls_to_scan
+            for portal_url in web_search_results.get('portal_urls', []):
+                if portal_url not in results['exhibitor_pages']:
+                    results['exhibitor_pages'].insert(0, portal_url)
+                if portal_url not in urls_to_scan:
+                    urls_to_scan.insert(1, portal_url)  # Add right after base URL
+                    self._log(f"    🌐 Web search found portal: {portal_url}")
 
         # === PRIORITIZE DOCUMENT PAGES ===
         # These pages are most likely to have technical documents - scan them FIRST
@@ -814,16 +845,19 @@ class ClaudeAgent:
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
 
-    async def _web_search_for_portals(self, fair_name: str) -> List[str]:
+    async def _web_search_for_portals(self, fair_name: str) -> dict:
         """
         Search the web for exhibitor portals and event manuals.
         Uses DuckDuckGo HTML search (no API key required).
+
+        Returns dict with 'pdf_links' and 'portal_urls'.
         """
         import urllib.request
         import urllib.parse
         import urllib.error
 
-        found_urls = []
+        found_pdfs = []
+        found_portals = []
 
         # Clean fair name (remove year if present)
         clean_name = re.sub(r'\s*20\d{2}\s*', ' ', fair_name).strip()
@@ -832,6 +866,7 @@ class ClaudeAgent:
         search_queries = [
             f"{clean_name} exhibitor manual",
             f"{clean_name} online event manual",
+            f"{clean_name} exhibitor welcome pack",
             f"{clean_name} stand build regulations",
         ]
 
@@ -848,7 +883,7 @@ class ClaudeAgent:
             'gsma.com',         # GSMA directly
         ]
 
-        for query in search_queries[:2]:  # Limit to 2 searches to save time
+        for query in search_queries[:3]:  # Check 3 searches
             try:
                 # Use DuckDuckGo HTML search
                 encoded_query = urllib.parse.quote_plus(query)
@@ -873,22 +908,32 @@ class ClaudeAgent:
                     try:
                         decoded_url = urllib.parse.unquote(match)
                         parsed = urlparse(decoded_url)
-
-                        # Check if it's an interesting external portal
                         host = parsed.netloc.lower()
+                        path_lower = parsed.path.lower()
 
-                        # Skip the main fair domain (we already have that)
-                        if any(domain in host for domain in interesting_domains):
-                            # Reconstruct clean URL
+                        # Skip non-interesting domains
+                        is_interesting = any(domain in host for domain in interesting_domains)
+                        has_keywords = any(kw in decoded_url.lower() for kw in [
+                            'exhibitor', 'oem', 'event-manual', 'eventmanual',
+                            'stand-build', 'welcome-pack', 'welcomepack'
+                        ])
+
+                        if not (is_interesting or has_keywords):
+                            continue
+                        if 'duckduckgo' in host:
+                            continue
+
+                        # Check if it's a PDF
+                        if path_lower.endswith('.pdf'):
+                            # Keep full URL for PDFs
+                            if decoded_url not in found_pdfs:
+                                found_pdfs.append(decoded_url)
+                                self._log(f"    📄 Web search found PDF: {decoded_url[:80]}...")
+                        else:
+                            # For portals, clean the URL
                             clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                            if clean_url not in found_urls:
-                                found_urls.append(clean_url)
-
-                        # Also check for exhibitor-related keywords in the URL
-                        url_lower = decoded_url.lower()
-                        if any(kw in url_lower for kw in ['exhibitor', 'oem', 'event-manual', 'eventmanual', 'stand-build']):
-                            if decoded_url not in found_urls and 'duckduckgo' not in decoded_url:
-                                found_urls.append(decoded_url)
+                            if clean_url not in found_portals:
+                                found_portals.append(clean_url)
 
                     except Exception:
                         continue
@@ -900,7 +945,10 @@ class ClaudeAgent:
                 self._log(f"    Web search error: {e}")
                 continue
 
-        return found_urls[:5]  # Return max 5 URLs to avoid overloading
+        return {
+            'pdf_links': found_pdfs[:5],
+            'portal_urls': found_portals[:5]
+        }
 
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
@@ -916,9 +964,33 @@ class ClaudeAgent:
 
             pre_scan_results = None
             pre_scan_info = ""
+            classification_result = None
+            skip_browser_agent = False
 
             if input_data.known_url:
                 pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
+
+                # PHASE 1.5: Classify found documents with LLM (STRICT validation)
+                if pre_scan_results['pdf_links']:
+                    self._log("📋 Starting STRICT document classification with LLM...")
+                    classifier = DocumentClassifier(self.client, self._log)
+
+                    classification_result = await classifier.classify_documents(
+                        pdf_links=pre_scan_results['pdf_links'],
+                        fair_name=input_data.fair_name,
+                        target_year="2026",
+                        exhibitor_pages=pre_scan_results.get('exhibitor_pages', [])
+                    )
+
+                    # QUALITY GATE: Only skip agent when classifier says it's safe
+                    # This requires 3+ documents with STRONG confidence (year+fair verified)
+                    if classification_result.skip_agent_safe:
+                        self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
+                        self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
+                        skip_browser_agent = True
+                    else:
+                        self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
+                        self._log("   Browser agent draait voor extra validatie.")
 
                 # Format pre-scan results for the agent
                 if pre_scan_results['pdf_links']:
@@ -981,6 +1053,14 @@ class ClaudeAgent:
                             pre_scan_info += f"  • {page}\n"
                     pre_scan_info += "\n⚠️ BELANGRIJK: Bezoek EERST de exhibitor portal(s) hierboven - daar staan vaak de beste documenten!"
 
+            # EARLY RETURN: If classification found enough documents, skip browser agent
+            if skip_browser_agent and classification_result:
+                self._log("🚀 Building output from pre-scan classification (skipping browser agent)...")
+                output = self._build_output_from_classification(
+                    classification_result, output, input_data, pre_scan_results, start_time
+                )
+                return output
+
             # PHASE 2: Launch browser for visual verification
             await self.browser.launch()
             self._log("Browser launched")
@@ -989,15 +1069,39 @@ class ClaudeAgent:
             self._log(f"Navigated to: {start_url}")
 
             # Build initial message with pre-scan results
+            # If we have classification results, add focused instructions
+            classification_info = ""
+            reduced_iterations = False
+
+            if classification_result and classification_result.found_types:
+                # Some documents found - tell agent what's already done
+                classification_info = "\n\n" + "=" * 60 + "\n"
+                classification_info += "🎯 PRE-SCAN CLASSIFICATIE RESULTATEN:\n"
+                classification_info += "=" * 60 + "\n"
+                classification_info += classification_result.get_found_prompt_section()
+                classification_info += "\n\n"
+                classification_info += classification_result.get_missing_prompt_section()
+                classification_info += "\n" + "=" * 60
+
+                # Reduce max iterations when we only need to find a few things
+                if len(classification_result.missing_types) <= 2:
+                    reduced_iterations = True
+                    self._log(f"📉 Verlaagde iteraties: slechts {len(classification_result.missing_types)} documenten te vinden")
+
             user_message = f"""
 Vind informatie voor de beurs: {input_data.fair_name}
 {f'Stad: {input_data.city}' if input_data.city else ''}
 {f'Land: {input_data.country}' if input_data.country else ''}
 {f'Start URL: {input_data.known_url}' if input_data.known_url else ''}
+{classification_info}
 {pre_scan_info}
 
-{'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] else 'Navigeer door de website en vind alle gevraagde documenten.'}
+{'BELANGRIJK: Focus ALLEEN op de missende documenten! De andere zijn al gevalideerd.' if classification_result and classification_result.missing_types else ''}
+{'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] and not classification_result else 'Navigeer door de website en vind alle gevraagde documenten.'}
 """
+
+            # Reduce iterations if we only need a few more documents
+            effective_max_iterations = 15 if reduced_iterations else self.max_iterations
 
             # Get initial screenshot
             screenshot = await self.browser.screenshot()
@@ -1027,9 +1131,9 @@ Vind informatie voor de beurs: {input_data.fair_name}
             done = False
             final_result = None
 
-            while not done and iteration < self.max_iterations:
+            while not done and iteration < effective_max_iterations:
                 iteration += 1
-                self._log(f"Iteration {iteration}/{self.max_iterations}")
+                self._log(f"Iteration {iteration}/{effective_max_iterations}")
 
                 # Mid-point check - encourage deeper exploration
                 if iteration == 20:
@@ -1207,6 +1311,32 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 
                 # Auto-map downloads to document fields based on filename
                 self._auto_map_download(download, output)
+
+            # Merge classification results with agent results (classification as fallback)
+            if classification_result:
+                # Only use classification result if agent didn't find it
+                if not output.documents.floorplan_url and classification_result.floorplan:
+                    if classification_result.floorplan.confidence in ['strong', 'partial']:
+                        output.documents.floorplan_url = classification_result.floorplan.url
+                        output.quality.floorplan = classification_result.floorplan.confidence
+                        output.primary_reasoning.floorplan = f"PRE-SCAN: {classification_result.floorplan.reason}"
+
+                if not output.documents.exhibitor_manual_url and classification_result.exhibitor_manual:
+                    if classification_result.exhibitor_manual.confidence in ['strong', 'partial']:
+                        output.documents.exhibitor_manual_url = classification_result.exhibitor_manual.url
+                        output.quality.exhibitor_manual = classification_result.exhibitor_manual.confidence
+                        output.primary_reasoning.exhibitor_manual = f"PRE-SCAN: {classification_result.exhibitor_manual.reason}"
+
+                if not output.documents.rules_url and classification_result.rules:
+                    if classification_result.rules.confidence in ['strong', 'partial']:
+                        output.documents.rules_url = classification_result.rules.url
+                        output.quality.rules = classification_result.rules.confidence
+                        output.primary_reasoning.rules = f"PRE-SCAN: {classification_result.rules.reason}"
+
+                if not output.documents.exhibitor_directory_url and classification_result.exhibitor_directory:
+                    output.documents.exhibitor_directory_url = classification_result.exhibitor_directory
+                    output.quality.exhibitor_directory = "strong"
+                    output.primary_reasoning.exhibitor_directory = "PRE-SCAN: Exhibitor directory page"
 
             output.debug.notes.append(f"Agent completed in {iteration} iterations")
             output.debug.notes.append(f"Auto-mapped {len(downloads)} downloaded files to output fields")
@@ -1679,6 +1809,132 @@ Kind regards,
 === DRAFT EMAIL (ENGLISH) ===
 
 {english_email}"""
+
+    def _build_output_from_classification(
+        self,
+        classification: ClassificationResult,
+        output: DiscoveryOutput,
+        input_data: TestCaseInput,
+        pre_scan_results: dict,
+        start_time: float
+    ) -> DiscoveryOutput:
+        """
+        Build output directly from classification results (no browser agent needed).
+        This is used when the prescan + classification found all required documents
+        with STRONG confidence (year verified, fair verified).
+        """
+        # Set official URL/domain
+        if input_data.known_url:
+            output.official_url = input_data.known_url
+            output.official_domain = urlparse(input_data.known_url).netloc
+
+        # Map classified documents to output (ONLY strong confidence counts)
+        if classification.floorplan and classification.floorplan.confidence == 'strong':
+            output.documents.floorplan_url = classification.floorplan.url
+            output.quality.floorplan = "strong"
+            output.primary_reasoning.floorplan = f"PRE-SCAN GEVALIDEERD: {classification.floorplan.reason} (jaar: {classification.floorplan.year_verified}, beurs: {classification.floorplan.fair_verified})"
+
+        if classification.exhibitor_manual and classification.exhibitor_manual.confidence == 'strong':
+            output.documents.exhibitor_manual_url = classification.exhibitor_manual.url
+            output.quality.exhibitor_manual = "strong"
+            output.primary_reasoning.exhibitor_manual = f"PRE-SCAN GEVALIDEERD: {classification.exhibitor_manual.reason} (jaar: {classification.exhibitor_manual.year_verified}, beurs: {classification.exhibitor_manual.fair_verified})"
+
+        if classification.rules and classification.rules.confidence == 'strong':
+            output.documents.rules_url = classification.rules.url
+            output.quality.rules = "strong"
+            output.primary_reasoning.rules = f"PRE-SCAN GEVALIDEERD: {classification.rules.reason} (jaar: {classification.rules.year_verified}, beurs: {classification.rules.fair_verified})"
+
+        if classification.schedule and classification.schedule.confidence == 'strong':
+            output.documents.schedule_page_url = classification.schedule.url
+            output.quality.schedule = "strong"
+            output.primary_reasoning.schedule = f"PRE-SCAN GEVALIDEERD: {classification.schedule.reason}"
+
+        if classification.exhibitor_directory:
+            output.documents.exhibitor_directory_url = classification.exhibitor_directory
+            output.quality.exhibitor_directory = "strong"
+            output.primary_reasoning.exhibitor_directory = "PRE-SCAN: Exhibitor directory page gevonden"
+
+        # Add any downloads page from pre-scan
+        if pre_scan_results.get('exhibitor_pages'):
+            for page in pre_scan_results['exhibitor_pages']:
+                page_lower = page.lower()
+                if any(kw in page_lower for kw in ['download', 'document', 'resource']):
+                    output.documents.downloads_overview_url = page
+                    break
+
+        # Add extracted schedules from PDFs
+        if classification.aggregated_schedule:
+            for entry in classification.aggregated_schedule.build_up:
+                if entry.get('date'):
+                    output.schedule.build_up.append(ScheduleEntry(
+                        date=entry.get('date'),
+                        time=entry.get('time', ''),
+                        description=entry.get('description', 'Build-up'),
+                        source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
+                    ))
+            for entry in classification.aggregated_schedule.tear_down:
+                if entry.get('date'):
+                    output.schedule.tear_down.append(ScheduleEntry(
+                        date=entry.get('date'),
+                        time=entry.get('time', ''),
+                        description=entry.get('description', 'Tear-down'),
+                        source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
+                    ))
+            if output.schedule.build_up or output.schedule.tear_down:
+                output.quality.schedule = "strong"
+                output.primary_reasoning.schedule = f"PRE-SCAN: Schema geëxtraheerd uit PDF ({len(output.schedule.build_up)} opbouw, {len(output.schedule.tear_down)} afbouw entries)"
+                self._log(f"📅 Added schedule from PDF: {len(output.schedule.build_up)} build-up, {len(output.schedule.tear_down)} tear-down")
+
+        # Add extracted contacts from PDFs
+        if classification.aggregated_contacts:
+            for email in classification.aggregated_contacts.emails:
+                if email and '@' in email:
+                    output.contact_info.emails.append(ContactEmail(
+                        email=email,
+                        context=f"Extracted from PDF by LLM",
+                        source_url=classification.aggregated_contacts.source_url or ''
+                    ))
+            if classification.aggregated_contacts.organization:
+                output.contact_info.organization_name = classification.aggregated_contacts.organization
+            self._log(f"📧 Added contacts from PDF: {len(classification.aggregated_contacts.emails)} emails")
+
+        # Also add emails from pre-scan (webpage mailto links)
+        if pre_scan_results.get('emails'):
+            for email_data in pre_scan_results['emails']:
+                # Avoid duplicates
+                existing_emails = [e.email for e in output.contact_info.emails]
+                if email_data['email'] not in existing_emails:
+                    output.contact_info.emails.append(ContactEmail(
+                        email=email_data['email'],
+                        context=email_data.get('context', ''),
+                        source_url=email_data.get('source_url', '')
+                    ))
+            self._log(f"Added {len(pre_scan_results['emails'])} contact emails from webpage")
+
+        # Generate email draft if anything is still missing
+        output.email_draft_if_missing = self._generate_email_draft(output, input_data)
+
+        # Record debug info
+        elapsed_time = int(time.time() - start_time)
+        strong_count = sum([
+            1 if classification.floorplan and classification.floorplan.confidence == 'strong' else 0,
+            1 if classification.exhibitor_manual and classification.exhibitor_manual.confidence == 'strong' else 0,
+            1 if classification.rules and classification.rules.confidence == 'strong' else 0,
+            1 if classification.schedule and classification.schedule.confidence == 'strong' else 0,
+            1 if classification.exhibitor_directory else 0,
+        ])
+
+        output.debug.notes.append("🚀 SNELLE MODUS: Documenten gevonden via pre-scan + LLM classificatie")
+        output.debug.notes.append(f"KWALITEITSCHECK: {strong_count}/5 documenten met STRONG confidence")
+        output.debug.notes.append(f"Browser agent overgeslagen - alle kritieke documenten gevalideerd")
+        output.debug.notes.append(f"Totale tijd: {elapsed_time}s (vs ~5-7 minuten met browser agent)")
+
+        if classification.missing_types:
+            output.debug.notes.append(f"Niet gevonden (niet kritiek): {', '.join(classification.missing_types)}")
+
+        self._log(f"✅ Output gebouwd uit pre-scan classificatie in {elapsed_time}s")
+
+        return output
 
 
 async def run_discovery(
