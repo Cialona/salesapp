@@ -403,6 +403,40 @@ class ClaudeAgent:
                                 })
                                 self._log(f"    ⭐ High-value doc: {link.text[:40]}...")
 
+                    # === DISCOVER EXHIBITOR PORTAL SUBDOMAINS ===
+                    # Look for links to external exhibitor portals (e.g., exhibitors-seg.seafoodexpo.com)
+                    for link in relevant_links.get('all_links', []):
+                        try:
+                            link_parsed = urlparse(link.url)
+                            link_host = link_parsed.netloc.lower()
+
+                            # Skip same domain
+                            if link_host == base_netloc.lower():
+                                continue
+
+                            # Check if this looks like an exhibitor portal subdomain
+                            exhibitor_portal_indicators = [
+                                'exhibitor', 'aussteller', 'espositori', 'exposant',
+                                'expo.', 'portal', 'services.', 'booth', 'stand'
+                            ]
+
+                            is_exhibitor_portal = any(ind in link_host for ind in exhibitor_portal_indicators)
+
+                            # Also check if link text suggests exhibitor portal
+                            link_text_lower = (link.text or '').lower()
+                            text_suggests_portal = any(kw in link_text_lower for kw in [
+                                'exhibitor portal', 'exhibitor service', 'for exhibitors',
+                                'booth', 'stand design', 'technical', 'regulations'
+                            ])
+
+                            if is_exhibitor_portal or text_suggests_portal:
+                                portal_url = f"{link_parsed.scheme}://{link_parsed.netloc}"
+                                if portal_url not in [p for p in found_pages_to_scan]:
+                                    found_pages_to_scan.append(portal_url)
+                                    self._log(f"    🌐 Discovered exhibitor portal: {link_host}")
+                        except:
+                            continue
+
                     # Collect document-related pages for second pass (including cross-domain)
                     # Check ALL links, not just exhibitor/download links
                     all_page_links = (
@@ -450,10 +484,19 @@ class ClaudeAgent:
                                 results['exhibitor_pages'].append(link.url)
 
                                 # Allow same domain or related exhibitor portals
-                                is_related_domain = any(rd in link.url for rd in [
-                                    'exhibitors.', 'aussteller.', 'espositori.',
-                                    'fieramilano.it', '/content/dam/', base_netloc
-                                ])
+                                # More permissive to catch event-specific portals like exhibitors-seg.seafoodexpo.com
+                                link_host = urlparse(link.url).netloc.lower()
+                                is_related_domain = (
+                                    base_netloc in link.url or  # Same domain
+                                    '/content/dam/' in link.url or  # CMS content
+                                    any(pattern in link_host for pattern in [
+                                        'exhibitor', 'aussteller', 'espositori', 'exposant',
+                                        'portal', 'services', 'booth', 'stand'
+                                    ]) or
+                                    # Check if shares root domain
+                                    (len(base_netloc.split('.')) >= 2 and
+                                     '.'.join(base_netloc.split('.')[-2:]) in link_host)
+                                )
 
                                 if is_related_domain and link.url not in urls_to_scan:
                                     found_pages_to_scan.append(link.url)
