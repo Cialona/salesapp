@@ -240,31 +240,39 @@ class ClaudeAgent:
             for subdomain in exhibitor_subdomains:
                 related_domains.append(f"https://{subdomain}")
 
+        # === PRIORITIZE DOCUMENT PAGES ===
+        # These pages are most likely to have technical documents - scan them FIRST
+        priority_document_paths = [
+            # Technical document pages (HIGHEST PRIORITY - often have the PDFs we need)
+            '/en/technical-regulations', '/technical-regulations',
+            '/en/sustainable-set-up', '/sustainable-set-up',
+            '/en/technical-guidelines', '/technical-guidelines',
+            '/en/fiere-e-eventi/esporre',  # Italian fairs often use this
+            '/regolamento-tecnico', '/it/regolamento-tecnico',
+            '/technische-richtlinien', '/de/technische-richtlinien',
+        ]
+
+        # Add priority document pages FIRST (right after base URL)
+        for path in priority_document_paths:
+            urls_to_scan.append(f"{base_domain}{path}")
+
         # Add related domain root pages
         for domain in related_domains:
             urls_to_scan.append(domain)
 
-        # Add common document page patterns (generic)
-        # These are paths where technical documents are often found, NOT under fair-specific paths
+        # Add common exhibitor/service page patterns (lower priority)
         generic_paths = [
             # English
             '/en/exhibitors', '/exhibitors', '/en/participate', '/participate',
             '/en/services', '/services', '/en/downloads', '/downloads',
             '/en/information', '/information', '/en/planning', '/planning',
             '/for-exhibitors', '/en/for-exhibitors',
-            # Technical document pages (often NOT under fair-specific paths!)
-            '/en/technical-regulations', '/technical-regulations',
-            '/en/sustainable-set-up', '/sustainable-set-up',
-            '/en/technical-guidelines', '/technical-guidelines',
             '/en/stand-construction', '/stand-construction',
             '/en/exhibitor-services', '/exhibitor-services',
-            '/en/fiere-e-eventi/esporre',  # Italian fairs often use this
             # German
             '/aussteller', '/de/aussteller', '/technik', '/de/technik',
-            '/technische-richtlinien', '/de/technische-richtlinien',
             # Italian
             '/espositori', '/it/espositori', '/partecipare', '/it/partecipare',
-            '/regolamento-tecnico', '/it/regolamento-tecnico',
         ]
 
         # Add fair-specific paths (e.g., /en/eurocucina/exhibitors)
@@ -272,7 +280,7 @@ class ClaudeAgent:
             '/exhibitors', '/participate', '/services', '/downloads',
             '/information', '/planning', '/technical', '/regulations',
             '/stand-design', '/documents', '/for-exhibitors',
-            '/technical-regulations', '/sustainable-set-up',  # Added combined paths
+            '/technical-regulations', '/sustainable-set-up',
         ]
 
         # Add generic paths to base domain
@@ -314,7 +322,7 @@ class ClaudeAgent:
             self._log("Pre-scan browser launched")
 
             # First pass: scan initial URLs
-            for url in urls_to_scan[:15]:  # Limit to prevent slowdown
+            for url in urls_to_scan[:20]:  # Increased limit to ensure document pages are scanned
                 try:
                     await pre_scan_browser.goto(url)
                     await asyncio.sleep(0.5)  # Let JavaScript execute
@@ -331,6 +339,13 @@ class ClaudeAgent:
                             lower_url = link.url.lower()
                             lower_text = link.text.lower()
 
+                            # Detect year from URL or text (prioritize current/future years)
+                            doc_year = None
+                            for year in ['2026', '2025', '2024', '2023', '2022']:
+                                if year in link.url or year in link.text:
+                                    doc_year = year
+                                    break
+
                             # Determine document type from URL and text
                             doc_type = 'unknown'
                             if any(kw in lower_url or kw in lower_text for kw in ['technical', 'regulation', 'richtlin', 'regolamento', 'reg.', 'reg_', 'tecnic']):
@@ -346,9 +361,11 @@ class ClaudeAgent:
                                 'url': link.url,
                                 'text': link.text,
                                 'type': doc_type,
+                                'year': doc_year,
                                 'source_page': url
                             })
-                            self._log(f"    📄 Found PDF: {link.text[:40] or link.url[:60]}...")
+                            year_info = f" [{doc_year}]" if doc_year else ""
+                            self._log(f"    📄 Found PDF{year_info}: {link.text[:40] or link.url[:60]}...")
 
                     # Process high-value document links (expand them!)
                     for link in relevant_links.get('high_value_links', []):
@@ -357,6 +374,13 @@ class ClaudeAgent:
                             lower_text = link.text.lower()
 
                             if '.pdf' in lower_url or 'download' in lower_url or '/files/' in lower_url:
+                                # Detect year
+                                doc_year = None
+                                for year in ['2026', '2025', '2024', '2023', '2022']:
+                                    if year in link.url or year in link.text:
+                                        doc_year = year
+                                        break
+
                                 doc_type = 'unknown'
                                 if any(kw in lower_url or kw in lower_text for kw in ['technical', 'regulation', 'richtlin', 'regolamento']):
                                     doc_type = 'technical_guidelines'
@@ -367,6 +391,7 @@ class ClaudeAgent:
                                     'url': link.url,
                                     'text': link.text,
                                     'type': doc_type,
+                                    'year': doc_year,
                                     'source_page': url
                                 })
                                 self._log(f"    ⭐ High-value doc: {link.text[:40]}...")
@@ -457,6 +482,13 @@ class ClaudeAgent:
                             lower_url = link.url.lower()
                             lower_text = link.text.lower()
 
+                            # Detect year
+                            doc_year = None
+                            for year in ['2026', '2025', '2024', '2023', '2022']:
+                                if year in link.url or year in link.text:
+                                    doc_year = year
+                                    break
+
                             doc_type = 'unknown'
                             if any(kw in lower_url or kw in lower_text for kw in ['technical', 'regulation', 'richtlin', 'regolamento']):
                                 doc_type = 'technical_guidelines'
@@ -471,22 +503,33 @@ class ClaudeAgent:
                                 'url': link.url,
                                 'text': link.text,
                                 'type': doc_type,
+                                'year': doc_year,
                                 'source_page': url
                             })
-                            self._log(f"    📄 Found PDF (2nd pass): {link.text[:40] or link.url[:60]}...")
+                            year_info = f" [{doc_year}]" if doc_year else ""
+                            self._log(f"    📄 Found PDF{year_info} (2nd pass): {link.text[:40] or link.url[:60]}...")
 
                     # Also check high-value links in second pass
                     for link in relevant_links.get('high_value_links', []):
                         if link.url not in [p['url'] for p in results['pdf_links']]:
                             lower_url = link.url.lower()
                             if '.pdf' in lower_url or 'download' in lower_url or '/files/' in lower_url:
+                                # Detect year
+                                doc_year = None
+                                for year in ['2026', '2025', '2024', '2023', '2022']:
+                                    if year in link.url or year in link.text:
+                                        doc_year = year
+                                        break
+
                                 results['pdf_links'].append({
                                     'url': link.url,
                                     'text': link.text,
                                     'type': 'unknown',
+                                    'year': doc_year,
                                     'source_page': url
                                 })
-                                self._log(f"    ⭐ High-value (2nd): {link.text[:40]}...")
+                                year_info = f" [{doc_year}]" if doc_year else ""
+                                self._log(f"    ⭐ High-value{year_info} (2nd): {link.text[:40]}...")
 
                 except Exception:
                     continue
@@ -523,9 +566,19 @@ class ClaudeAgent:
                     pre_scan_info += "\n\n🎯 PRE-SCAN RESULTATEN - DOCUMENTEN GEVONDEN VOORAF:\n"
                     pre_scan_info += "=" * 60 + "\n"
 
-                    # Group by type
+                    # Sort PDFs by year (2026 first, then 2025, etc.) and by type
+                    def sort_key(pdf):
+                        year = pdf.get('year', '0000')
+                        if year is None:
+                            year = '0000'
+                        # Sort descending by year (2026 > 2025 > ...)
+                        return (-int(year) if year.isdigit() else 0, pdf['type'])
+
+                    sorted_pdfs = sorted(pre_scan_results['pdf_links'], key=sort_key)
+
+                    # Group by type, but prioritize 2026 documents
                     by_type = {}
-                    for pdf in pre_scan_results['pdf_links']:
+                    for pdf in sorted_pdfs:
                         doc_type = pdf['type']
                         if doc_type not in by_type:
                             by_type[doc_type] = []
@@ -539,13 +592,25 @@ class ClaudeAgent:
                         'unknown': '📄 OVERIGE DOCUMENTEN'
                     }
 
-                    for doc_type, pdfs in by_type.items():
+                    # Show important types first, then unknown
+                    type_order = ['technical_guidelines', 'exhibitor_manual', 'floorplan', 'schedule', 'unknown']
+
+                    for doc_type in type_order:
+                        if doc_type not in by_type:
+                            continue
+                        pdfs = by_type[doc_type]
                         pre_scan_info += f"\n{type_labels.get(doc_type, doc_type)}:\n"
-                        for pdf in pdfs[:5]:  # Limit per category
-                            pre_scan_info += f"  ⭐ {pdf['url']}\n"
+                        for pdf in pdfs[:8]:  # Increased limit per category
+                            year_tag = f" [📅 {pdf.get('year')}]" if pdf.get('year') else ""
+                            # Highlight 2026 documents
+                            if pdf.get('year') == '2026':
+                                pre_scan_info += f"  🌟 {pdf['url']}{year_tag} ← GEBRUIK DIT!\n"
+                            else:
+                                pre_scan_info += f"  ⭐ {pdf['url']}{year_tag}\n"
 
                     pre_scan_info += "\n" + "=" * 60
-                    pre_scan_info += "\n💡 GEBRUIK goto_url om deze documenten direct te openen en valideren!\n"
+                    pre_scan_info += "\n💡 BELANGRIJK: Gebruik de 2026 documenten (🌟) - dit zijn de meest recente!\n"
+                    pre_scan_info += "💡 GEBRUIK goto_url om documenten direct te openen en valideren!\n"
 
                 if pre_scan_results['exhibitor_pages']:
                     pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
