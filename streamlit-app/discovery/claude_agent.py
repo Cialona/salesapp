@@ -376,13 +376,43 @@ class ClaudeAgent:
         # Search the web to find exhibitor manuals/portals that may not be linked from main site
         if fair_name:
             self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
-            web_search_urls = await self._web_search_for_portals(fair_name)
-            for url in web_search_urls:
-                if url not in results['exhibitor_pages']:
-                    results['exhibitor_pages'].insert(0, url)
-                if url not in urls_to_scan:
-                    urls_to_scan.insert(1, url)  # Add right after base URL
-                    self._log(f"    🌐 Web search found: {url}")
+            web_search_results = await self._web_search_for_portals(fair_name)
+
+            # Add found PDFs directly to pdf_links (these are high-value direct downloads)
+            for pdf_url in web_search_results.get('pdf_links', []):
+                existing_urls = [p['url'] if isinstance(p, dict) else p for p in results['pdf_links']]
+                if pdf_url not in existing_urls:
+                    # Determine type from URL
+                    url_lower = pdf_url.lower()
+                    if 'welcome' in url_lower or 'exhibitor' in url_lower or 'manual' in url_lower:
+                        pdf_type = 'exhibitor_manual'
+                    elif 'technical' in url_lower or 'regulation' in url_lower or 'guideline' in url_lower:
+                        pdf_type = 'technical_guidelines'
+                    elif 'floor' in url_lower or 'map' in url_lower or 'plan' in url_lower:
+                        pdf_type = 'floorplan'
+                    else:
+                        pdf_type = 'unknown'
+
+                    # Extract year from URL if present
+                    year_match = re.search(r'20(2[4-9]|3[0-9])', pdf_url)
+                    pdf_year = f"20{year_match.group(1)}" if year_match else None
+
+                    # Add as dict format consistent with other pdf_links
+                    results['pdf_links'].insert(0, {
+                        'url': pdf_url,
+                        'text': f"Web search: {pdf_url.split('/')[-1]}",
+                        'type': pdf_type,
+                        'year': pdf_year
+                    })
+                    self._log(f"    📥 Web search PDF ({pdf_type}): {pdf_url[:60]}...")
+
+            # Add found portals to exhibitor_pages and urls_to_scan
+            for portal_url in web_search_results.get('portal_urls', []):
+                if portal_url not in results['exhibitor_pages']:
+                    results['exhibitor_pages'].insert(0, portal_url)
+                if portal_url not in urls_to_scan:
+                    urls_to_scan.insert(1, portal_url)  # Add right after base URL
+                    self._log(f"    🌐 Web search found portal: {portal_url}")
 
         # === PRIORITIZE DOCUMENT PAGES ===
         # These pages are most likely to have technical documents - scan them FIRST
@@ -814,16 +844,19 @@ class ClaudeAgent:
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
 
-    async def _web_search_for_portals(self, fair_name: str) -> List[str]:
+    async def _web_search_for_portals(self, fair_name: str) -> dict:
         """
         Search the web for exhibitor portals and event manuals.
         Uses DuckDuckGo HTML search (no API key required).
+
+        Returns dict with 'pdf_links' and 'portal_urls'.
         """
         import urllib.request
         import urllib.parse
         import urllib.error
 
-        found_urls = []
+        found_pdfs = []
+        found_portals = []
 
         # Clean fair name (remove year if present)
         clean_name = re.sub(r'\s*20\d{2}\s*', ' ', fair_name).strip()
@@ -832,6 +865,7 @@ class ClaudeAgent:
         search_queries = [
             f"{clean_name} exhibitor manual",
             f"{clean_name} online event manual",
+            f"{clean_name} exhibitor welcome pack",
             f"{clean_name} stand build regulations",
         ]
 
@@ -848,7 +882,7 @@ class ClaudeAgent:
             'gsma.com',         # GSMA directly
         ]
 
-        for query in search_queries[:2]:  # Limit to 2 searches to save time
+        for query in search_queries[:3]:  # Check 3 searches
             try:
                 # Use DuckDuckGo HTML search
                 encoded_query = urllib.parse.quote_plus(query)
@@ -873,22 +907,32 @@ class ClaudeAgent:
                     try:
                         decoded_url = urllib.parse.unquote(match)
                         parsed = urlparse(decoded_url)
-
-                        # Check if it's an interesting external portal
                         host = parsed.netloc.lower()
+                        path_lower = parsed.path.lower()
 
-                        # Skip the main fair domain (we already have that)
-                        if any(domain in host for domain in interesting_domains):
-                            # Reconstruct clean URL
+                        # Skip non-interesting domains
+                        is_interesting = any(domain in host for domain in interesting_domains)
+                        has_keywords = any(kw in decoded_url.lower() for kw in [
+                            'exhibitor', 'oem', 'event-manual', 'eventmanual',
+                            'stand-build', 'welcome-pack', 'welcomepack'
+                        ])
+
+                        if not (is_interesting or has_keywords):
+                            continue
+                        if 'duckduckgo' in host:
+                            continue
+
+                        # Check if it's a PDF
+                        if path_lower.endswith('.pdf'):
+                            # Keep full URL for PDFs
+                            if decoded_url not in found_pdfs:
+                                found_pdfs.append(decoded_url)
+                                self._log(f"    📄 Web search found PDF: {decoded_url[:80]}...")
+                        else:
+                            # For portals, clean the URL
                             clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                            if clean_url not in found_urls:
-                                found_urls.append(clean_url)
-
-                        # Also check for exhibitor-related keywords in the URL
-                        url_lower = decoded_url.lower()
-                        if any(kw in url_lower for kw in ['exhibitor', 'oem', 'event-manual', 'eventmanual', 'stand-build']):
-                            if decoded_url not in found_urls and 'duckduckgo' not in decoded_url:
-                                found_urls.append(decoded_url)
+                            if clean_url not in found_portals:
+                                found_portals.append(clean_url)
 
                     except Exception:
                         continue
@@ -900,7 +944,10 @@ class ClaudeAgent:
                 self._log(f"    Web search error: {e}")
                 continue
 
-        return found_urls[:5]  # Return max 5 URLs to avoid overloading
+        return {
+            'pdf_links': found_pdfs[:5],
+            'portal_urls': found_portals[:5]
+        }
 
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
