@@ -322,15 +322,17 @@ class ClaudeAgent:
         self.max_iterations = max_iterations
         self.debug = debug
         self.on_status = on_status or (lambda x: None)
+        self._discovery_log: List[str] = []  # Detailed log for troubleshooting
 
     def _log(self, message: str) -> None:
-        """Log a message."""
+        """Log a message and collect it for the discovery log."""
+        timestamp = time.strftime('%H:%M:%S')
         if self.debug:
-            timestamp = time.strftime('%H:%M:%S')
             print(f"[{timestamp}] {message}")
         else:
             print(message)
         self.on_status(message)
+        self._discovery_log.append(f"[{timestamp}] {message}")
 
     async def _pre_scan_website(self, base_url: str, fair_name: str = "") -> Dict[str, Any]:
         """
@@ -1050,13 +1052,20 @@ class ClaudeAgent:
                 try:
                     self._log(f"  🌐 Scanning portal: {portal_url}")
                     await scan_browser.goto(portal_url)
-                    await asyncio.sleep(1)  # Wait for SPA to render
+                    await asyncio.sleep(3)  # Wait longer for SPA to render (Salesforce etc.)
 
                     portal_domain = urlparse(portal_url).netloc
 
                     # Extract the main page content
                     main_text = await scan_browser.extract_page_text(max_chars=10000)
                     main_title = (await scan_browser.get_state()).title
+
+                    # If page has very little content, wait longer (SPA may still be loading)
+                    if not main_text or len(main_text) < 200:
+                        self._log(f"    ⏳ Page still loading, waiting extra 3s...")
+                        await asyncio.sleep(3)
+                        main_text = await scan_browser.extract_page_text(max_chars=10000)
+                        main_title = (await scan_browser.get_state()).title
 
                     if main_text and len(main_text) > 100:
                         portal_pages.append({
@@ -1109,7 +1118,7 @@ class ClaudeAgent:
 
                         try:
                             await scan_browser.goto(link.url)
-                            await asyncio.sleep(0.8)  # Wait for SPA render
+                            await asyncio.sleep(2)  # Wait for SPA render (Salesforce needs time)
                             sub_pages_scanned += 1
 
                             page_text = await scan_browser.extract_page_text(max_chars=10000)
@@ -1279,12 +1288,18 @@ class ClaudeAgent:
         # Clean fair name (remove year if present)
         clean_name = re.sub(r'\s*20\d{2}\s*', ' ', fair_name).strip()
 
-        # Search queries to try
+        # Also try with year for more specific results
+        year_match = re.search(r'20\d{2}', fair_name)
+        year_str = year_match.group(0) if year_match else "2026"
+
+        # Search queries to try - more diverse to catch portals
         search_queries = [
-            f"{clean_name} exhibitor manual",
-            f"{clean_name} online event manual",
+            f"{clean_name} {year_str} exhibitor manual PDF",
+            f"{clean_name} online event manual OEM",
+            f"{clean_name} {year_str} exhibitor portal",
+            f"{clean_name} stand build rules regulations {year_str}",
             f"{clean_name} exhibitor welcome pack",
-            f"{clean_name} stand build regulations",
+            f'"{clean_name}" site:my.site.com OR site:salesforce.com',
         ]
 
         # Domains we're interested in (external portals)
@@ -1298,10 +1313,18 @@ class ClaudeAgent:
             'smallworldlabs.com',  # Small World Labs (Seafood Expo)
             'event-assets.',    # GSMA event assets
             'gsma.com',         # GSMA directly
+            'gsma.',            # Any GSMA subdomain
         ]
 
-        for query in search_queries[:3]:  # Check 3 searches
+        # Also interested in any PDF that matches fair-related keywords
+        fair_pdf_keywords = [
+            'exhibitor', 'manual', 'welcome', 'technical', 'regulation',
+            'guideline', 'stand-build', 'standbuild', 'floorplan', 'floor-plan',
+        ]
+
+        for query in search_queries[:4]:  # Check 4 searches
             try:
+                self._log(f"    🔍 Web search: '{query}'")
                 # Use DuckDuckGo HTML search
                 encoded_query = urllib.parse.quote_plus(query)
                 search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
@@ -1332,10 +1355,16 @@ class ClaudeAgent:
                         is_interesting = any(domain in host for domain in interesting_domains)
                         has_keywords = any(kw in decoded_url.lower() for kw in [
                             'exhibitor', 'oem', 'event-manual', 'eventmanual',
-                            'stand-build', 'welcome-pack', 'welcomepack'
+                            'stand-build', 'welcome-pack', 'welcomepack',
+                            'technical-regulation', 'technical-guideline',
                         ])
+                        # Also catch any PDF with fair-related keywords
+                        is_fair_pdf = (
+                            path_lower.endswith('.pdf') and
+                            any(kw in decoded_url.lower() for kw in fair_pdf_keywords)
+                        )
 
-                        if not (is_interesting or has_keywords):
+                        if not (is_interesting or has_keywords or is_fair_pdf):
                             continue
                         if 'duckduckgo' in host:
                             continue
@@ -1372,12 +1401,18 @@ class ClaudeAgent:
         output = create_empty_output(input_data.fair_name)
         output.city = input_data.city
         output.country = input_data.country
+        self._discovery_log = []  # Reset log for each run
 
         start_time = time.time()
 
         try:
             # PHASE 1: Pre-scan website for documents (HTML-based, fast)
+            self._log("=" * 60)
+            self._log("FASE 1: PRE-SCAN WEBSITE")
+            self._log("=" * 60)
             start_url = input_data.known_url or f"https://www.google.com/search?q={input_data.fair_name}+official+website"
+            self._log(f"Start URL: {start_url}")
+            self._log(f"Beurs: {input_data.fair_name} | Stad: {input_data.city} | Land: {input_data.country}")
 
             pre_scan_results = None
             pre_scan_info = ""
@@ -1386,13 +1421,33 @@ class ClaudeAgent:
 
             if input_data.known_url:
                 pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
+                self._log(f"Pre-scan resultaat: {len(pre_scan_results.get('pdf_links', []))} PDFs, "
+                         f"{len(pre_scan_results.get('exhibitor_pages', []))} exhibitor pagina's, "
+                         f"{len(pre_scan_results.get('emails', []))} emails")
+                # Log all found PDFs
+                for pdf in pre_scan_results.get('pdf_links', []):
+                    self._log(f"  PDF [{pdf.get('type', '?')}] [{pdf.get('year', '?')}]: {pdf.get('url', '?')[:80]}")
+                # Log all exhibitor pages
+                for page in pre_scan_results.get('exhibitor_pages', []):
+                    self._log(f"  Exhibitor pagina: {page[:80]}")
 
                 # PHASE 1.25: Deep scan external portals (Salesforce, OEM, etc.)
                 # These portals have web page content (not PDFs) with rules, schedules, etc.
+                self._log("")
+                self._log("=" * 60)
+                self._log("FASE 1.25: PORTAL DETECTIE & DEEP SCAN")
+                self._log("=" * 60)
                 portal_pages = []
                 portal_urls = self._find_portal_urls(pre_scan_results)
+                self._log(f"Gevonden portal URLs: {len(portal_urls)}")
+                for purl in portal_urls:
+                    self._log(f"  Portal: {purl}")
                 if portal_urls:
                     portal_pages = await self._deep_scan_portals(portal_urls, input_data.fair_name)
+                    self._log(f"Portal deep scan resultaat: {len(portal_pages)} pagina's gevonden")
+                    for pp in portal_pages:
+                        content_len = len(pp.get('text_content', '') or '')
+                        self._log(f"  [{pp.get('detected_type', '?')}] {pp.get('url', '?')[:70]} ({content_len} chars)")
 
                     # Add any PDFs found on portal pages to our PDF list
                     for page in portal_pages:
@@ -1404,8 +1459,14 @@ class ClaudeAgent:
                                 'year': None,
                                 'source_page': 'portal'
                             })
+                else:
+                    self._log("⚠️ Geen portal URLs gevonden in pre-scan resultaten")
 
                 # PHASE 1.5: Classify found documents with LLM (STRICT validation)
+                self._log("")
+                self._log("=" * 60)
+                self._log("FASE 1.5: DOCUMENT CLASSIFICATIE (LLM)")
+                self._log("=" * 60)
                 if pre_scan_results['pdf_links'] or portal_pages:
                     self._log("📋 Starting STRICT document classification with LLM...")
                     classifier = DocumentClassifier(self.client, self._log)
@@ -1418,6 +1479,21 @@ class ClaudeAgent:
                         portal_pages=[p for p in portal_pages if p.get('text_content')],
                     )
 
+                    # Log classification results
+                    self._log(f"Classificatie resultaat:")
+                    self._log(f"  Gevonden types: {classification_result.found_types}")
+                    self._log(f"  Missende types: {classification_result.missing_types}")
+                    for dtype in ['floorplan', 'exhibitor_manual', 'rules', 'schedule']:
+                        cls = getattr(classification_result, dtype, None)
+                        if cls:
+                            self._log(f"  {dtype}: {cls.confidence} | year={cls.year_verified} | fair={cls.fair_verified} | url={cls.url[:70]}")
+                        else:
+                            self._log(f"  {dtype}: NIET GEVONDEN")
+                    if classification_result.exhibitor_directory:
+                        self._log(f"  exhibitor_directory: {classification_result.exhibitor_directory[:70]}")
+                    if classification_result.extra_urls_to_scan:
+                        self._log(f"  Extra URLs te scannen: {classification_result.extra_urls_to_scan}")
+
                     # QUALITY GATE: Only skip agent when classifier says it's safe
                     # This requires 3+ documents with STRONG confidence (year+fair verified)
                     if classification_result.skip_agent_safe:
@@ -1429,6 +1505,10 @@ class ClaudeAgent:
                         self._log("   Browser agent draait voor extra validatie.")
 
                     # PHASE 1.75: Secondary prescan for document references found in classified PDFs
+                    self._log("")
+                    self._log("=" * 60)
+                    self._log("FASE 1.75: SECONDARY PRESCAN (document referenties)")
+                    self._log("=" * 60)
                     if classification_result.extra_urls_to_scan and not skip_browser_agent:
                         self._log(f"🔄 Secondary prescan: checking {len(classification_result.extra_urls_to_scan)} document references...")
                         extra_pdfs = await self._scan_document_references(
@@ -1517,9 +1597,25 @@ class ClaudeAgent:
                 output = self._build_output_from_classification(
                     classification_result, output, input_data, pre_scan_results, start_time
                 )
+                # Attach discovery log
+                self._log("")
+                self._log("=" * 60)
+                self._log("RESULTAAT: Browser agent overgeslagen (voldoende documenten gevonden)")
+                self._log("=" * 60)
+                self._log(f"Floorplan: {output.documents.floorplan_url or 'NIET GEVONDEN'}")
+                self._log(f"Exhibitor Manual: {output.documents.exhibitor_manual_url or 'NIET GEVONDEN'}")
+                self._log(f"Rules: {output.documents.rules_url or 'NIET GEVONDEN'}")
+                self._log(f"Exhibitor Directory: {output.documents.exhibitor_directory_url or 'NIET GEVONDEN'}")
+                self._log(f"Schedule: {len(output.schedule.build_up)} opbouw + {len(output.schedule.tear_down)} afbouw entries")
+                self._log(f"Totale tijd: {int(time.time() - start_time)}s")
+                output.debug.discovery_log = list(self._discovery_log)
                 return output
 
             # PHASE 2: Launch browser for visual verification
+            self._log("")
+            self._log("=" * 60)
+            self._log("FASE 2: BROWSER AGENT (Computer Use)")
+            self._log("=" * 60)
             await self.browser.launch()
             self._log("Browser launched")
 
@@ -1819,6 +1915,19 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             output.debug.notes.append(f"Agent completed in {iteration} iterations")
             output.debug.notes.append(f"Auto-mapped {len(downloads)} downloaded files to output fields")
             output.debug.notes.append(f"Total time: {int(time.time() - start_time)}s")
+
+            # Attach the full discovery log for troubleshooting
+            self._log("")
+            self._log("=" * 60)
+            self._log("FASE 3: RESULTAAT SAMENVATTING")
+            self._log("=" * 60)
+            self._log(f"Floorplan: {output.documents.floorplan_url or 'NIET GEVONDEN'}")
+            self._log(f"Exhibitor Manual: {output.documents.exhibitor_manual_url or 'NIET GEVONDEN'}")
+            self._log(f"Rules: {output.documents.rules_url or 'NIET GEVONDEN'}")
+            self._log(f"Exhibitor Directory: {output.documents.exhibitor_directory_url or 'NIET GEVONDEN'}")
+            self._log(f"Schedule: {len(output.schedule.build_up)} opbouw + {len(output.schedule.tear_down)} afbouw entries")
+            self._log(f"Totale tijd: {int(time.time() - start_time)}s | Iteraties: {iteration}")
+            output.debug.discovery_log = list(self._discovery_log)
 
             # Add discovered emails to output
             if pre_scan_results and pre_scan_results.get('emails'):

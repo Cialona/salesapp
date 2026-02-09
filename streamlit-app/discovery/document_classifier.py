@@ -312,7 +312,9 @@ class DocumentClassifier:
                 continue
 
             for also_type in classification.also_contains:
-                if also_type in candidates and not getattr(result, also_type, None):
+                # Check if this type is still missing or only has weak/partial confidence
+                existing = getattr(result, also_type, None)
+                if not existing or (existing and existing.confidence not in ['strong']):
                     # This document also contains info for another missing type
                     # Create a cross-referenced classification
                     cross_ref = DocumentClassification(
@@ -345,13 +347,40 @@ class DocumentClassifier:
         result.extra_urls_to_scan = all_references
 
         # Check for exhibitor directory (URL-based, no PDF validation)
+        # Use scoring to prefer actual directory/list pages over resource pages
         if exhibitor_pages:
+            best_directory = None
+            best_score = -1
+
             for page in exhibitor_pages:
                 page_lower = page.lower()
-                if any(kw in page_lower for kw in ['exhibitor', 'directory', 'list', 'companies', 'exposant']):
-                    result.exhibitor_directory = page
-                    self.log(f"  ✓ exhibitor_directory: {page[:60]}...")
-                    break
+                score = 0
+
+                # Strong directory indicators (high score)
+                if '/exhibitors' == page_lower.split('?')[0].rstrip('/').split('/')[-1]:
+                    score += 10  # Exact /exhibitors path
+                if any(kw in page_lower for kw in ['directory', 'catalogue', 'catalog', '/exhibitors']):
+                    score += 5
+                if any(kw in page_lower for kw in ['list', 'companies', 'espositori', 'aussteller']):
+                    score += 3
+                if 'exposant' in page_lower:
+                    score += 3
+
+                # Weak indicators (these might be resource pages, not directories)
+                if 'exhibitor' in page_lower and score == 0:
+                    score += 1
+
+                # Penalty for non-directory pages
+                if any(kw in page_lower for kw in ['resource', 'service', 'download', 'manual', 'guide', 'technical']):
+                    score -= 3
+
+                if score > best_score:
+                    best_score = score
+                    best_directory = page
+
+            if best_directory and best_score > 0:
+                result.exhibitor_directory = best_directory
+                self.log(f"  ✓ exhibitor_directory (score={best_score}): {best_directory[:60]}...")
 
         # Calculate summary with STRICT quality gate
         all_types = ['floorplan', 'exhibitor_manual', 'rules', 'schedule']
