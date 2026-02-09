@@ -973,6 +973,225 @@ class ClaudeAgent:
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
 
+    def _find_portal_urls(self, pre_scan_results: Dict) -> List[str]:
+        """
+        Find external portal URLs from prescan results.
+        These are URLs on external platforms (Salesforce, OEM portals, etc.)
+        that likely contain exhibitor information as web pages.
+        """
+        portal_indicators = [
+            'my.site.com', 'force.com', 'salesforce.com',  # Salesforce
+            'cvent.com',  # Cvent
+            'a2zinc.net',  # A2Z
+            'expocad.',  # ExpoCad
+            'smallworldlabs.com',  # SWL
+        ]
+
+        portal_urls = []
+        seen = set()
+
+        # Check exhibitor pages for portal domains
+        for page_url in pre_scan_results.get('exhibitor_pages', []):
+            host = urlparse(page_url).netloc.lower()
+            if any(ind in host for ind in portal_indicators) and host not in seen:
+                seen.add(host)
+                portal_urls.append(page_url)
+
+        # Also check web search results if stored
+        for pdf in pre_scan_results.get('pdf_links', []):
+            source = pdf.get('source_page', '')
+            if source:
+                host = urlparse(source).netloc.lower()
+                if any(ind in host for ind in portal_indicators) and host not in seen:
+                    seen.add(host)
+                    portal_urls.append(source)
+
+        return portal_urls
+
+    async def _deep_scan_portals(self, portal_urls: List[str], fair_name: str) -> List[Dict]:
+        """
+        Deep scan external portals (Salesforce, OEM, etc.) to extract page content.
+
+        Many fairs host critical info (rules, schedule) on external portals as web pages,
+        not PDFs. This method visits those portals, follows internal links, and extracts
+        page content for classification.
+
+        Returns list of {url, text_content, page_title, detected_type} dicts.
+        """
+        portal_pages = []
+
+        if not portal_urls:
+            return portal_pages
+
+        self._log(f"🔍 Portal deep scan: scanning {len(portal_urls)} portal(s)...")
+
+        # Keywords that indicate pages worth scanning inside a portal
+        page_keywords = [
+            # Rules / regulations
+            'rule', 'regulation', 'guideline', 'technical', 'construction',
+            'stand build', 'stand design', 'provision', 'requirement',
+            'richtlijn', 'richtlinien', 'vorschrift', 'regolamento',
+            # Schedule
+            'schedule', 'build-up', 'buildup', 'build up', 'tear-down', 'teardown',
+            'dismantl', 'move-in', 'move-out', 'set-up', 'setup', 'timeline',
+            'aufbau', 'abbau', 'montage', 'démontage', 'opbouw', 'afbouw',
+            # Manual / guide
+            'manual', 'handbook', 'guide', 'welcome', 'exhibitor info',
+            'service', 'documentation', 'resource',
+            # Floor plan
+            'floor plan', 'floorplan', 'hall plan', 'map', 'layout', 'venue',
+        ]
+
+        scan_browser = BrowserController(800, 600)
+        try:
+            await scan_browser.launch()
+
+            for portal_url in portal_urls[:3]:  # Max 3 portals
+                try:
+                    self._log(f"  🌐 Scanning portal: {portal_url}")
+                    await scan_browser.goto(portal_url)
+                    await asyncio.sleep(1)  # Wait for SPA to render
+
+                    portal_domain = urlparse(portal_url).netloc
+
+                    # Extract the main page content
+                    main_text = await scan_browser.extract_page_text(max_chars=10000)
+                    main_title = (await scan_browser.get_state()).title
+
+                    if main_text and len(main_text) > 100:
+                        portal_pages.append({
+                            'url': portal_url,
+                            'text_content': main_text,
+                            'page_title': main_title,
+                            'detected_type': 'exhibitor_manual',  # Portal home = manual
+                        })
+                        self._log(f"    📝 Extracted portal home page: {len(main_text)} chars")
+
+                    # Get all links from the portal
+                    relevant_links = await scan_browser.get_relevant_links()
+                    all_links = relevant_links.get('all_links', [])
+
+                    # Also add PDF links found on the portal
+                    for link in relevant_links.get('pdf_links', []):
+                        portal_pages.append({
+                            'url': link.url,
+                            'text_content': None,  # PDF - will be downloaded by classifier
+                            'page_title': link.text,
+                            'detected_type': 'pdf',
+                            'is_pdf': True,
+                        })
+
+                    # Follow internal links that match document keywords
+                    visited = {portal_url}
+                    sub_pages_scanned = 0
+
+                    for link in all_links:
+                        if sub_pages_scanned >= 8:  # Max 8 sub-pages per portal
+                            break
+
+                        link_lower = (link.text or '').lower() + ' ' + link.url.lower()
+                        link_domain = urlparse(link.url).netloc
+
+                        # Only follow links on the same portal domain
+                        if link_domain != portal_domain:
+                            continue
+
+                        # Skip already visited
+                        if link.url in visited:
+                            continue
+
+                        # Check if the link text/URL contains relevant keywords
+                        has_keyword = any(kw in link_lower for kw in page_keywords)
+                        if not has_keyword:
+                            continue
+
+                        visited.add(link.url)
+
+                        try:
+                            await scan_browser.goto(link.url)
+                            await asyncio.sleep(0.8)  # Wait for SPA render
+                            sub_pages_scanned += 1
+
+                            page_text = await scan_browser.extract_page_text(max_chars=10000)
+                            page_state = await scan_browser.get_state()
+
+                            if not page_text or len(page_text) < 100:
+                                continue
+
+                            # Detect what type of content this page has
+                            detected_type = self._detect_page_type(link.url, link.text, page_text)
+
+                            portal_pages.append({
+                                'url': link.url,
+                                'text_content': page_text,
+                                'page_title': page_state.title or link.text,
+                                'detected_type': detected_type,
+                            })
+                            self._log(f"    📄 Portal sub-page [{detected_type}]: {link.text or link.url[:50]} ({len(page_text)} chars)")
+
+                            # Also check for PDFs on this sub-page
+                            sub_links = await scan_browser.get_relevant_links()
+                            for pdf_link in sub_links.get('pdf_links', []):
+                                if pdf_link.url not in visited:
+                                    portal_pages.append({
+                                        'url': pdf_link.url,
+                                        'text_content': None,
+                                        'page_title': pdf_link.text,
+                                        'detected_type': 'pdf',
+                                        'is_pdf': True,
+                                    })
+
+                        except Exception as e:
+                            self._log(f"    ⚠️ Could not scan sub-page: {link.url[:50]}: {e}")
+                            continue
+
+                    self._log(f"  ✅ Portal scan complete: {sub_pages_scanned} sub-pages, {len([p for p in portal_pages if p.get('text_content')])} pages with content")
+
+                except Exception as e:
+                    self._log(f"  ⚠️ Portal scan error for {portal_url[:50]}: {e}")
+                    continue
+
+        finally:
+            await scan_browser.close()
+
+        return portal_pages
+
+    def _detect_page_type(self, url: str, link_text: str, page_text: str) -> str:
+        """Detect the document type of a web page based on URL, title, and content."""
+        combined = f"{url} {link_text or ''} {page_text[:500]}".lower()
+
+        # Rules / technical guidelines (check first - most specific)
+        if any(kw in combined for kw in [
+            'stand build rule', 'construction rule', 'technical guideline',
+            'technical regulation', 'stand design rule', 'height limit',
+            'fire safety', 'electrical', 'construction requirement',
+        ]):
+            return 'rules'
+
+        # Schedule / build-up & tear-down
+        if any(kw in combined for kw in [
+            'build-up schedule', 'build up schedule', 'dismantling schedule',
+            'tear-down schedule', 'move-in schedule', 'set-up schedule',
+            'build-up & dismantl', 'aufbau und abbau', 'opbouw en afbouw',
+        ]):
+            return 'schedule'
+
+        # Floor plan
+        if any(kw in combined for kw in [
+            'floor plan', 'floorplan', 'hall plan', 'site map', 'venue map',
+            'exhibition layout', 'hallenplan', 'plattegrond',
+        ]):
+            return 'floorplan'
+
+        # Exhibitor manual (broader match)
+        if any(kw in combined for kw in [
+            'exhibitor manual', 'exhibitor handbook', 'exhibitor guide',
+            'welcome pack', 'event manual', 'service documentation',
+        ]):
+            return 'exhibitor_manual'
+
+        return 'unknown'
+
     async def _scan_document_references(self, urls: List[str]) -> List[Dict]:
         """
         Scan URLs found as references in classified documents.
@@ -1168,8 +1387,26 @@ class ClaudeAgent:
             if input_data.known_url:
                 pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
 
+                # PHASE 1.25: Deep scan external portals (Salesforce, OEM, etc.)
+                # These portals have web page content (not PDFs) with rules, schedules, etc.
+                portal_pages = []
+                portal_urls = self._find_portal_urls(pre_scan_results)
+                if portal_urls:
+                    portal_pages = await self._deep_scan_portals(portal_urls, input_data.fair_name)
+
+                    # Add any PDFs found on portal pages to our PDF list
+                    for page in portal_pages:
+                        if page.get('is_pdf'):
+                            pre_scan_results['pdf_links'].append({
+                                'url': page['url'],
+                                'text': page.get('page_title', ''),
+                                'type': page.get('detected_type', 'unknown'),
+                                'year': None,
+                                'source_page': 'portal'
+                            })
+
                 # PHASE 1.5: Classify found documents with LLM (STRICT validation)
-                if pre_scan_results['pdf_links']:
+                if pre_scan_results['pdf_links'] or portal_pages:
                     self._log("📋 Starting STRICT document classification with LLM...")
                     classifier = DocumentClassifier(self.client, self._log)
 
@@ -1177,7 +1414,8 @@ class ClaudeAgent:
                         pdf_links=pre_scan_results['pdf_links'],
                         fair_name=input_data.fair_name,
                         target_year="2026",
-                        exhibitor_pages=pre_scan_results.get('exhibitor_pages', [])
+                        exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
+                        portal_pages=[p for p in portal_pages if p.get('text_content')],
                     )
 
                     # QUALITY GATE: Only skip agent when classifier says it's safe
@@ -1205,7 +1443,8 @@ class ClaudeAgent:
                                 pdf_links=pre_scan_results['pdf_links'],
                                 fair_name=input_data.fair_name,
                                 target_year="2026",
-                                exhibitor_pages=pre_scan_results.get('exhibitor_pages', [])
+                                exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
+                                portal_pages=[p for p in portal_pages if p.get('text_content')],
                             )
                             if classification_result.skip_agent_safe:
                                 self._log(f"🎉 KWALITEITSCHECK NA SECONDARY SCAN GESLAAGD!")

@@ -131,6 +131,16 @@ class BrowserController:
             title=await self._page.title()
         )
 
+    async def extract_page_text(self, max_chars: int = 15000) -> str:
+        """Extract the visible text content from the current page."""
+        if not self._page:
+            return ""
+        try:
+            text = await self._page.evaluate("() => document.body.innerText")
+            return (text or "")[:max_chars]
+        except Exception:
+            return ""
+
     # Computer Use Actions
 
     async def click(self, x: int, y: int) -> None:

@@ -199,16 +199,19 @@ class DocumentClassifier:
         pdf_links: List[Dict],
         fair_name: str,
         target_year: str = "2026",
-        exhibitor_pages: List[str] = None
+        exhibitor_pages: List[str] = None,
+        portal_pages: List[Dict] = None,
     ) -> ClassificationResult:
         """
-        Classify all found PDFs and determine what's found vs missing.
+        Classify all found PDFs and portal pages, determine what's found vs missing.
 
         QUALITY REQUIREMENTS for skipping browser agent:
         - Document must have "strong" confidence
         - Document must contain the target year (2026)
         - Document must mention the fair or venue name
         - PDF must have extractable content (not empty/corrupt)
+
+        portal_pages: List of {url, text_content, page_title, detected_type} from portal scan
         """
         result = ClassificationResult()
 
@@ -291,6 +294,14 @@ class DocumentClassifier:
 
             if not getattr(result, doc_type):
                 self.log(f"  ✗ {doc_type}: geen valide document gevonden")
+
+        # PORTAL PAGES PHASE: Classify web page content from external portals
+        # This fills gaps that PDFs can't fill (e.g., Salesforce OEM portals)
+        if portal_pages:
+            self.log(f"🌐 Classifying {len(portal_pages)} portal pages...")
+            await self._classify_portal_pages(
+                portal_pages, result, fair_name, fair_keywords, target_year
+            )
 
         # CROSS-REFERENCE PHASE: Use already-validated docs to fill gaps
         # If an exhibitor manual also contains rules/schedule, use it for those types too
@@ -408,6 +419,203 @@ class DocumentClassifier:
             keywords.extend(['barcelona', 'fira', 'gran via'])
 
         return list(set(keywords))
+
+    async def _classify_portal_pages(
+        self,
+        portal_pages: List[Dict],
+        result: 'ClassificationResult',
+        fair_name: str,
+        fair_keywords: List[str],
+        target_year: str,
+    ) -> None:
+        """
+        Classify web page content from external portals.
+
+        Portal pages are web pages (not PDFs) that contain exhibitor information.
+        E.g., Salesforce OEM portals with stand build rules, schedules, etc.
+        """
+        # Map detected_type to our doc types
+        type_mapping = {
+            'rules': 'rules',
+            'schedule': 'schedule',
+            'floorplan': 'floorplan',
+            'exhibitor_manual': 'exhibitor_manual',
+            'unknown': None,  # Will try to detect
+        }
+
+        for page in portal_pages:
+            text_content = page.get('text_content')
+            page_url = page.get('url', '')
+
+            # Skip PDFs (handled separately) and pages without content
+            if page.get('is_pdf') or not text_content or len(text_content) < 100:
+                continue
+
+            detected_type = page.get('detected_type', 'unknown')
+            mapped_type = type_mapping.get(detected_type)
+
+            # If type is unknown, try to detect from content
+            if not mapped_type:
+                mapped_type = self._detect_content_type(page_url, text_content)
+
+            if not mapped_type:
+                continue
+
+            # Skip if we already have a strong classification for this type
+            existing = getattr(result, mapped_type, None)
+            if existing and existing.confidence == 'strong':
+                continue
+
+            # Validate the page content with LLM (same as PDF but no download needed)
+            classification = await self._validate_page_content(
+                page_url, text_content, mapped_type,
+                fair_name, fair_keywords, target_year,
+                page_title=page.get('page_title', '')
+            )
+
+            if classification.confidence == 'strong':
+                setattr(result, mapped_type, classification)
+                self.log(f"  ✓ Portal page [{mapped_type}]: STRONG ✓year={classification.year_verified} ✓fair={classification.fair_verified}")
+                self.log(f"    URL: {page_url[:70]}...")
+            elif classification.confidence == 'partial' and not getattr(result, mapped_type):
+                setattr(result, mapped_type, classification)
+                self.log(f"  ~ Portal page [{mapped_type}]: partial")
+
+        # For portal home pages: if we have a portal URL but haven't assigned exhibitor_manual,
+        # check if the portal home page qualifies as exhibitor manual
+        if not result.exhibitor_manual:
+            for page in portal_pages:
+                if page.get('detected_type') == 'exhibitor_manual' and page.get('text_content'):
+                    # Portal home page as exhibitor manual (common pattern for OEM portals)
+                    classification = await self._validate_page_content(
+                        page['url'], page['text_content'], 'exhibitor_manual',
+                        fair_name, fair_keywords, target_year,
+                        page_title=page.get('page_title', '')
+                    )
+                    if classification.confidence in ['strong', 'partial']:
+                        result.exhibitor_manual = classification
+                        self.log(f"  ✓ Portal home as exhibitor_manual: {classification.confidence}")
+                        break
+
+    def _detect_content_type(self, url: str, text: str) -> Optional[str]:
+        """Detect document type from page URL and content."""
+        combined = f"{url} {text[:500]}".lower()
+
+        if any(kw in combined for kw in [
+            'stand build rule', 'construction rule', 'technical guideline',
+            'technical regulation', 'height limit', 'fire safety',
+            'electrical requirement', 'stand design rule',
+        ]):
+            return 'rules'
+
+        if any(kw in combined for kw in [
+            'build-up schedule', 'dismantling schedule', 'tear-down',
+            'move-in schedule', 'set-up and dismantl', 'build up & dismantl',
+        ]):
+            return 'schedule'
+
+        if any(kw in combined for kw in [
+            'floor plan', 'floorplan', 'hall plan', 'venue map',
+        ]):
+            return 'floorplan'
+
+        return None
+
+    async def _validate_page_content(
+        self,
+        url: str,
+        text_content: str,
+        expected_type: str,
+        fair_name: str,
+        fair_keywords: List[str],
+        target_year: str,
+        page_title: str = "",
+    ) -> DocumentClassification:
+        """
+        Validate a web page's content (same logic as _validate_pdf_strict but no PDF download).
+        Used for portal pages, Salesforce sites, etc.
+        """
+        classification = DocumentClassification(
+            url=url,
+            document_type=expected_type,
+            confidence='none'
+        )
+
+        try:
+            if not text_content or len(text_content) < 100:
+                classification.reason = "Pagina bevat te weinig tekst"
+                return classification
+
+            classification.content_verified = True
+            classification.text_excerpt = text_content[:1000]
+
+            # Check for year
+            text_lower = text_content.lower()
+            year_patterns = [target_year, target_year[2:]]
+            classification.year_verified = any(yp in text_content for yp in year_patterns)
+
+            # Check for fair name
+            classification.fair_verified = any(kw in text_lower for kw in fair_keywords)
+
+            # Use LLM for detailed validation (reuse same method as PDFs)
+            validation_result = await self._llm_validate_and_extract(
+                text_content[:10000],
+                expected_type,
+                fair_name,
+                target_year,
+                url
+            )
+
+            classification.title = validation_result.get('title') or page_title
+            classification.year = validation_result.get('detected_year')
+            classification.reason = validation_result.get('reason', '')
+
+            # Extract schedule
+            if validation_result.get('schedule_found'):
+                classification.extracted_schedule = ExtractedSchedule(
+                    build_up=validation_result.get('build_up', []),
+                    tear_down=validation_result.get('tear_down', []),
+                    source_url=url
+                )
+
+            # Extract contacts
+            if validation_result.get('emails') or validation_result.get('phones'):
+                classification.extracted_contacts = ExtractedContact(
+                    emails=validation_result.get('emails', []),
+                    phones=validation_result.get('phones', []),
+                    organization=validation_result.get('organization'),
+                    source_url=url
+                )
+
+            # Cross-reference info
+            classification.document_references = validation_result.get('document_references', [])
+            classification.also_contains = validation_result.get('also_contains_types', [])
+
+            # Confidence assignment (same logic as PDF)
+            is_correct_type = validation_result.get('is_correct_type', False)
+            is_correct_fair = validation_result.get('is_correct_fair', False) or classification.fair_verified
+            is_correct_year = validation_result.get('is_correct_year', False) or classification.year_verified
+            is_useful = validation_result.get('is_useful', False)
+
+            classification.year_verified = is_correct_year
+            classification.fair_verified = is_correct_fair
+
+            if is_correct_type and is_correct_fair and is_correct_year and is_useful:
+                classification.confidence = 'strong'
+                classification.is_validated = True
+            elif is_correct_type and (is_correct_fair or is_correct_year) and is_useful:
+                classification.confidence = 'partial'
+                classification.is_validated = True
+            elif is_correct_type:
+                classification.confidence = 'weak'
+            else:
+                classification.confidence = 'none'
+
+        except Exception as e:
+            classification.reason = f"Portal page validatie fout: {str(e)}"
+            classification.confidence = 'none'
+
+        return classification
 
     async def _validate_pdf_strict(
         self,
