@@ -9,10 +9,13 @@ QUALITY ASSURANCE:
 - Requires year match (2026) in document content
 - Requires fair name or venue name match
 - Extracts additional info (schedules, emails) from validated documents
+- Cross-references documents to find info across document types
+- Generates search strategies for missing documents
 """
 
 import re
 import io
+import json
 import asyncio
 import tempfile
 from dataclasses import dataclass, field
@@ -71,6 +74,11 @@ class DocumentClassification:
     extracted_schedule: Optional[ExtractedSchedule] = None
     extracted_contacts: Optional[ExtractedContact] = None
 
+    # Cross-reference info extracted from document
+    venue_name: Optional[str] = None  # Venue name mentioned in document
+    document_references: List[str] = field(default_factory=list)  # URLs/references to other docs
+    also_contains: List[str] = field(default_factory=list)  # Other doc types found in this doc
+
 
 @dataclass
 class ClassificationResult:
@@ -94,22 +102,66 @@ class ClassificationResult:
     aggregated_schedule: Optional[ExtractedSchedule] = None
     aggregated_contacts: Optional[ExtractedContact] = None
 
+    # Cross-reference results
+    detected_venue: Optional[str] = None  # Venue name detected from documents
+    search_hints: List[str] = field(default_factory=list)  # Specific search hints for missing docs
+    extra_urls_to_scan: List[str] = field(default_factory=list)  # URLs found in documents to scan
+
     def get_missing_prompt_section(self) -> str:
-        """Generate prompt section describing what's missing."""
+        """Generate prompt section describing what's missing with specific search hints."""
         if not self.missing_types:
             return ""
 
         type_descriptions = {
             'floorplan': 'Plattegrond/floorplan van de beurshallen',
             'exhibitor_manual': 'Exposanten handleiding/manual met standbouw regels',
-            'rules': 'Technische richtlijnen/regulations voor standbouw',
+            'rules': 'Technische richtlijnen/regulations voor standbouw (BEURS-SPECIFIEK, niet van de venue!)',
             'schedule': 'Opbouw/afbouw schema met datums en tijden',
+        }
+
+        type_search_hints = {
+            'floorplan': [
+                'Check /maps of /floorplan pagina',
+                'Zoek naar "Hall plan", "Site map", "Venue map"',
+                'Soms te vinden op interactieve kaart pagina',
+            ],
+            'exhibitor_manual': [
+                'Zoek naar "Exhibitor Manual", "Welcome Pack", "Exhibitor Guide", "Event Manual"',
+                'Check externe portals (Salesforce/my.site.com, OEM)',
+                'Vaak achter "Downloads" of "Exhibitor Resources" sectie',
+                'Probeer web search: "[beursnaam] exhibitor welcome pack PDF"',
+            ],
+            'rules': [
+                'Zoek naar "Technical Guidelines", "Stand Construction Rules", "Technical Regulations"',
+                'NIET zoeken naar venue-specifieke regels (bijv. Fira Barcelona algemene regels)',
+                'Check of het exhibitor manual/welcome pack ook technische regels bevat',
+                'Vaak te vinden als aparte PDF op de download pagina',
+            ],
+            'schedule': [
+                'Check of het exhibitor manual ook opbouw/afbouw schema bevat',
+                'Zoek naar "Build-up schedule", "Move-in dates", "Set-up and dismantling"',
+                'Soms te vinden op de "Practical Information" of "Planning" pagina',
+                'Kijk naar de agenda/programma pagina voor beursdatums',
+            ],
+            'exhibitor_directory': [
+                'Zoek naar /exhibitors, /catalogue, exhibitor lijst',
+                'Soms op een apart subdomein: exhibitors.[domain]',
+            ],
         }
 
         lines = ["NOG TE VINDEN (focus hierop):"]
         for doc_type in self.missing_types:
             desc = type_descriptions.get(doc_type, doc_type)
             lines.append(f"  ✗ {doc_type}: {desc}")
+            hints = type_search_hints.get(doc_type, [])
+            for hint in hints:
+                lines.append(f"    → {hint}")
+
+        # Add document references as extra hints
+        if self.extra_urls_to_scan:
+            lines.append("\n  📎 REFERENTIES GEVONDEN IN ANDERE DOCUMENTEN:")
+            for url in self.extra_urls_to_scan[:5]:
+                lines.append(f"    → Bekijk: {url}")
 
         return "\n".join(lines)
 
@@ -239,6 +291,47 @@ class DocumentClassifier:
 
             if not getattr(result, doc_type):
                 self.log(f"  ✗ {doc_type}: geen valide document gevonden")
+
+        # CROSS-REFERENCE PHASE: Use already-validated docs to fill gaps
+        # If an exhibitor manual also contains rules/schedule, use it for those types too
+        self.log("🔄 Cross-referencing validated documents...")
+        for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
+            classification = getattr(result, doc_type)
+            if not classification or not classification.also_contains:
+                continue
+
+            for also_type in classification.also_contains:
+                if also_type in candidates and not getattr(result, also_type, None):
+                    # This document also contains info for another missing type
+                    # Create a cross-referenced classification
+                    cross_ref = DocumentClassification(
+                        url=classification.url,
+                        document_type=also_type,
+                        confidence=classification.confidence,
+                        year=classification.year,
+                        title=f"{classification.title} (bevat ook {also_type})" if classification.title else None,
+                        reason=f"Cross-reference: gevonden in {doc_type} document",
+                        is_validated=classification.is_validated,
+                        text_excerpt=classification.text_excerpt,
+                        year_verified=classification.year_verified,
+                        fair_verified=classification.fair_verified,
+                        content_verified=classification.content_verified,
+                        extracted_schedule=classification.extracted_schedule,
+                        extracted_contacts=classification.extracted_contacts,
+                    )
+                    setattr(result, also_type, cross_ref)
+                    self.log(f"  🔄 Cross-ref: {doc_type} document bevat ook {also_type} info → {classification.url[:60]}...")
+
+        # Collect document references for secondary scan
+        all_references = []
+        for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
+            classification = getattr(result, doc_type)
+            if classification and classification.document_references:
+                for ref in classification.document_references:
+                    if ref and ref.startswith('http') and ref not in all_references:
+                        all_references.append(ref)
+                        self.log(f"  📎 Document reference found: {ref[:60]}...")
+        result.extra_urls_to_scan = all_references
 
         # Check for exhibitor directory (URL-based, no PDF validation)
         if exhibitor_pages:
@@ -390,6 +483,10 @@ class DocumentClassifier:
                     source_url=url
                 )
 
+            # Extract cross-reference info
+            classification.document_references = validation_result.get('document_references', [])
+            classification.also_contains = validation_result.get('also_contains_types', [])
+
             # STRICT confidence assignment
             is_correct_type = validation_result.get('is_correct_type', False)
             is_correct_fair = validation_result.get('is_correct_fair', False) or classification.fair_verified
@@ -490,7 +587,7 @@ class DocumentClassifier:
 
         expected_desc = type_descriptions.get(expected_type, expected_type)
 
-        prompt = f"""Analyseer dit document GRONDIG en extraheer informatie.
+        prompt = f"""Analyseer dit document GRONDIG en extraheer ALLE informatie.
 
 DOCUMENT URL: {url}
 GEZOCHTE BEURS: {fair_name}
@@ -522,19 +619,24 @@ Beantwoord in JSON formaat:
 
   "emails": ["email@example.com"],
   "phones": ["+31 123 456 789"],
-  "organization": "naam van de organisatie"
+  "organization": "naam van de organisatie",
+
+  "document_references": ["URLs of namen van andere documenten die in dit document worden genoemd, bijv. 'Technical Guidelines available at https://...' of 'See Event Manual for details'"],
+  "also_contains_types": ["andere documenttypes die dit document OOK bevat. Keuzes: 'rules', 'schedule', 'exhibitor_manual', 'floorplan'. Bijv. als een exhibitor manual ook technische regels bevat, zet 'rules'. Als het ook opbouw/afbouw datums en tijden bevat, zet 'schedule'."]
 }}
 
 KWALITEITSEISEN:
 - "is_correct_type" = ALLEEN true als dit ECHT een {expected_type} is
-- "is_correct_fair" = true als document {fair_name} of de venue/organisator noemt
+- "is_correct_fair" = true als document {fair_name} of de beurs-organisator noemt
 - "is_correct_year" = true als document {target_year} bevat
 - "is_useful" = true als document nuttige info bevat voor standbouwers
 
-EXTRACTIE:
-- Zoek naar opbouw/afbouw datums en tijden
+EXTRACTIE (HEEL BELANGRIJK - zoek naar ALLES):
+- Zoek naar opbouw/afbouw datums en tijden (ook als dit niet het verwachte type is!)
 - Zoek naar contact emails en telefoonnummers
 - Zoek naar de naam van de organiserende partij
+- Zoek naar VERWIJZINGEN naar andere documenten (URLs, documentnamen, "zie document X")
+- Bevat dit document OOK info van een ander type? Bijv. een exhibitor manual/welcome pack kan ook technische regels of een opbouwschema bevatten - dit is HEEL BELANGRIJK om te detecteren!
 
 Antwoord ALLEEN met valide JSON."""
 
@@ -553,7 +655,6 @@ Antwoord ALLEEN met valide JSON."""
                 if json_match:
                     response_text = json_match.group(1)
 
-            import json
             result = json.loads(response_text)
 
             return result
@@ -611,6 +712,38 @@ Antwoord ALLEEN met valide JSON."""
                 organization=organization
             )
             self.log(f"  📧 Extracted contacts: {len(set(all_emails))} emails, {len(set(all_phones))} phones")
+
+        # Generate search hints based on what we found
+        self._generate_search_hints(result)
+
+    def _generate_search_hints(self, result: ClassificationResult) -> None:
+        """Generate specific search hints based on classification results."""
+        hints = []
+
+        # If we found an exhibitor manual but rules are missing,
+        # suggest checking if rules are within the manual or referenced
+        if result.exhibitor_manual and 'rules' in result.missing_types:
+            if result.exhibitor_manual.also_contains and 'rules' in result.exhibitor_manual.also_contains:
+                hints.append("Het exhibitor manual bevat ook technische regels - check of dit voldoende is")
+            else:
+                hints.append("Exhibitor manual gevonden maar geen aparte technische richtlijnen - zoek op de download pagina")
+
+        # If schedule is missing but we found it cross-referenced
+        if 'schedule' in result.missing_types:
+            # Check if any found document has schedule info
+            for doc_type in ['exhibitor_manual', 'rules']:
+                classification = getattr(result, doc_type)
+                if classification and classification.extracted_schedule:
+                    if classification.extracted_schedule.build_up or classification.extracted_schedule.tear_down:
+                        hints.append(f"Schema informatie gevonden in {doc_type} document")
+
+        # If we have document references from found docs
+        if result.extra_urls_to_scan:
+            hints.append(f"{len(result.extra_urls_to_scan)} document-referenties gevonden in gevalideerde PDFs")
+
+        result.search_hints = hints
+        if hints:
+            self.log(f"  💡 Search hints: {'; '.join(hints)}")
 
 
 async def quick_classify_url(url: str) -> Tuple[str, str]:

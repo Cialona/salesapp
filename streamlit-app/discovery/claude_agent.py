@@ -179,6 +179,134 @@ Geef je resultaten als JSON. BELANGRIJK:
 Accepteer NOOIT documenten die niet aan de criteria voldoen!"""
 
 
+def build_focused_system_prompt(
+    classification_result: Optional['ClassificationResult'] = None,
+    missing_types: Optional[list] = None,
+) -> str:
+    """
+    Build a dynamic, focused system prompt based on what's already found and what's missing.
+
+    Instead of the full generic prompt, this creates a targeted prompt that:
+    - Only includes validation criteria for MISSING document types
+    - Adds specific search strategies based on what the classifier found
+    - Reduces cognitive load on the agent by removing irrelevant sections
+    """
+    if not classification_result or not missing_types:
+        return SYSTEM_PROMPT  # Fall back to generic prompt
+
+    # Determine which document types still need to be found
+    found_types = classification_result.found_types if classification_result else []
+
+    # Base instructions (always included)
+    prompt_parts = [
+        """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites.
+
+=== JOUW MISSIE ===
+Je zoekt SPECIFIEK naar de documenten die hieronder als MISSEND staan gemarkeerd.
+De andere documenten zijn REEDS GEVONDEN en GEVALIDEERD - je hoeft die NIET meer te zoeken.
+
+=== ZOEKSTRATEGIE ===
+
+**STAP 1: Identificeer de juiste secties**
+Zoek naar deze menu-items/links:
+- "For Exhibitors" / "Exhibitors" / "Aussteller" / "Participate"
+- "Planning" / "Preparation" / "Services" / "Information"
+- "Downloads" / "Documents" / "Documentation" / "Downloadcenter"
+
+**STAP 2: Zoek verborgen document-secties**
+- Accordion/dropdown secties (klik op + of ▼ icons)
+- Subsecties binnen "Participate" of "How to exhibit"
+
+**STAP 3: Check PDF links op elke pagina**
+- Bestandsnamen met relevante termen
+- CMS-paden: /sites/default/files/, /content/dam/, /documents/
+- Jaarnummers in bestandsnaam (2026)
+
+**STAP 4: VOLG EXTERNE LINKS NAAR EXHIBITOR PORTALS!**
+- "Online Event Manual" (OEM) - vaak op Salesforce (my.site.com)
+- Links naar "Stand Build Rules", "Technical Manual", "Event Manual"
+- VOLG deze links met goto_url!
+"""
+    ]
+
+    # Add ONLY the validation criteria for MISSING types
+    prompt_parts.append("\n=== VALIDATIE CRITERIA (alleen voor wat je zoekt) ===\n")
+
+    criteria_map = {
+        'floorplan': """**Floor Plan / Hall Plan (Plattegrond)**
+✅ MOET BEVATTEN: Visuele layout van hallen, standposities, halnummers, ingangen
+❌ MAG NIET: Stadskaart, routebeschrijving, hotelkaart
+🔍 Zoekwoorden: "Geländeplan", "Hallenplan", "Floor plan", "Site plan", "Exhibition map"
+""",
+        'exhibitor_manual': """**Exhibitor Manual / Handbook (Exposanten Handleiding)**
+✅ MOET BEVATTEN: Regels/voorschriften, opbouw/afbouw procedures, deadlines, logistiek, do's & don'ts
+❌ MAG NIET: "Why exhibit" brochure, prijslijsten, sales materiaal
+🔍 Zoekwoorden: "Service Documentation", "Exhibitor Guide", "Welcome Pack", "Provisions for stand design"
+""",
+        'rules': """**Technical Guidelines / Rules (Technische Richtlijnen)**
+✅ MOET BEVATTEN: Bouwhoogte, elektra specs, vloerbelasting, brandveiligheid, constructie-eisen
+❌ MAG NIET: Algemene huisregels, prijslijsten, VENUE-SPECIFIEKE regels (alleen beurs-specifiek!)
+🔍 Zoekwoorden: "Technical Guidelines", "Technische Richtlinien", "Technical Regulations", "Stand Construction"
+⚠️ BELANGRIJK: Zoek naar regels die SPECIFIEK voor deze beurs zijn, NIET generieke venue-regels!
+""",
+        'schedule': """**Build-up & Tear-down Schedule (Schema)**
+✅ MOET BEVATTEN: CONCRETE datums (DD-MM-YYYY), tijden (HH:MM), opbouw én afbouw
+❌ MAG NIET: Vage info, alleen beursdagen
+🔍 Zoekwoorden: "Set-up and dismantling", "Aufbau und Abbau", "Timeline"
+💡 TIP: Check of het Exhibitor Manual ook schema-informatie bevat!
+""",
+        'exhibitor_directory': """**Exhibitor Directory (Exposantenlijst)**
+✅ MOET BEVATTEN: Lijst met bedrijfsnamen, bij voorkeur met standnummers
+❌ MAG NIET: Sponsorlijst, één bedrijfsprofiel
+🔍 Vaak op: /exhibitors, /catalogue, subdomein exhibitors.xxx.com
+""",
+    }
+
+    for doc_type in missing_types:
+        if doc_type in criteria_map:
+            prompt_parts.append(criteria_map[doc_type])
+
+    # Add search hints from classifier
+    if classification_result.search_hints:
+        prompt_parts.append("\n=== HINTS VAN PRE-SCAN ===\n")
+        for hint in classification_result.search_hints:
+            prompt_parts.append(f"💡 {hint}")
+
+    if classification_result.extra_urls_to_scan:
+        prompt_parts.append("\n📎 REFERENTIES UIT GEVONDEN DOCUMENTEN (bezoek deze!):")
+        for url in classification_result.extra_urls_to_scan[:5]:
+            prompt_parts.append(f"  → {url}")
+
+    # Tools and output format
+    prompt_parts.append("""
+=== TOOLS ===
+
+1. **computer** - voor screenshots en interactie
+2. **goto_url** - DIRECT naar URL navigeren
+3. **deep_scan** - Scant de hele pagina, opent alle accordions/dropdowns
+
+=== OUTPUT FORMAT ===
+
+Geef je resultaten als JSON met ALLEEN de missende documenten:
+
+```json
+{
+  "floorplan_url": "https://exacte-url.pdf",
+  "floorplan_validation": "Bevat hallenplan met standposities - VOLDOET",
+
+  "notes": "Beschrijving van je zoekpad"
+}
+```
+
+⚠️ KRITIEK:
+- Gebruik null als je NIETS kunt vinden
+- Gebruik null + "_validation": "NIET GEVONDEN: reden" als je het niet vond
+- Accepteer NOOIT documenten die niet aan de criteria voldoen!
+- NIET zoeken naar documenten die al gevonden zijn!""")
+
+    return "\n".join(prompt_parts)
+
+
 class ClaudeAgent:
     """Claude Computer Use agent for trade fair discovery."""
 
@@ -845,6 +973,76 @@ class ClaudeAgent:
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
 
+    async def _scan_document_references(self, urls: List[str]) -> List[Dict]:
+        """
+        Scan URLs found as references in classified documents.
+        Returns any PDFs found on those pages.
+        """
+        found_pdfs = []
+
+        for url in urls[:5]:  # Limit to 5 references
+            try:
+                parsed = urlparse(url)
+                url_lower = url.lower()
+
+                # If it's directly a PDF, add it
+                if url_lower.endswith('.pdf'):
+                    doc_type = 'unknown'
+                    if any(kw in url_lower for kw in ['technical', 'regulation', 'guideline', 'normativ']):
+                        doc_type = 'technical_guidelines'
+                    elif any(kw in url_lower for kw in ['manual', 'handbook', 'welcome', 'pack', 'guide']):
+                        doc_type = 'exhibitor_manual'
+
+                    # Detect year
+                    year_match = re.search(r'20(2[4-9]|3[0-9])', url)
+                    pdf_year = f"20{year_match.group(1)}" if year_match else None
+
+                    found_pdfs.append({
+                        'url': url,
+                        'text': f"Document reference: {url.split('/')[-1]}",
+                        'type': doc_type,
+                        'year': pdf_year,
+                        'source_page': 'cross-reference'
+                    })
+                    self._log(f"    📎 Direct PDF reference: {url[:60]}...")
+                    continue
+
+                # Otherwise try to scan the page for PDFs
+                scan_browser = BrowserController(800, 600)
+                try:
+                    await scan_browser.launch()
+                    await scan_browser.goto(url)
+                    await asyncio.sleep(0.5)
+
+                    relevant_links = await scan_browser.get_relevant_links()
+                    for link in relevant_links.get('pdf_links', []):
+                        link_lower = link.url.lower()
+                        doc_type = 'unknown'
+                        if any(kw in link_lower for kw in ['technical', 'regulation', 'guideline']):
+                            doc_type = 'technical_guidelines'
+                        elif any(kw in link_lower for kw in ['manual', 'handbook', 'welcome', 'pack']):
+                            doc_type = 'exhibitor_manual'
+
+                        year_match = re.search(r'20(2[4-9]|3[0-9])', link.url)
+                        pdf_year = f"20{year_match.group(1)}" if year_match else None
+
+                        found_pdfs.append({
+                            'url': link.url,
+                            'text': link.text,
+                            'type': doc_type,
+                            'year': pdf_year,
+                            'source_page': url
+                        })
+                    self._log(f"    📎 Scanned reference page: {url[:60]} → {len(relevant_links.get('pdf_links', []))} PDFs")
+                finally:
+                    await scan_browser.close()
+
+            except Exception as e:
+                self._log(f"    ⚠️ Could not scan reference: {url[:40]}: {e}")
+                continue
+
+        return found_pdfs
+
     async def _web_search_for_portals(self, fair_name: str) -> dict:
         """
         Search the web for exhibitor portals and event manuals.
@@ -992,6 +1190,27 @@ class ClaudeAgent:
                         self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
                         self._log("   Browser agent draait voor extra validatie.")
 
+                    # PHASE 1.75: Secondary prescan for document references found in classified PDFs
+                    if classification_result.extra_urls_to_scan and not skip_browser_agent:
+                        self._log(f"🔄 Secondary prescan: checking {len(classification_result.extra_urls_to_scan)} document references...")
+                        extra_pdfs = await self._scan_document_references(
+                            classification_result.extra_urls_to_scan
+                        )
+                        if extra_pdfs:
+                            # Add to prescan results and re-classify
+                            pre_scan_results['pdf_links'].extend(extra_pdfs)
+                            self._log(f"  Found {len(extra_pdfs)} additional PDFs from document references")
+                            # Re-run classification with new PDFs
+                            classification_result = await classifier.classify_documents(
+                                pdf_links=pre_scan_results['pdf_links'],
+                                fair_name=input_data.fair_name,
+                                target_year="2026",
+                                exhibitor_pages=pre_scan_results.get('exhibitor_pages', [])
+                            )
+                            if classification_result.skip_agent_safe:
+                                self._log(f"🎉 KWALITEITSCHECK NA SECONDARY SCAN GESLAAGD!")
+                                skip_browser_agent = True
+
                 # Format pre-scan results for the agent
                 if pre_scan_results['pdf_links']:
                     pre_scan_info += "\n\n🎯 PRE-SCAN RESULTATEN - DOCUMENTEN GEVONDEN VOORAF:\n"
@@ -1068,13 +1287,23 @@ class ClaudeAgent:
             await self.browser.goto(start_url)
             self._log(f"Navigated to: {start_url}")
 
-            # Build initial message with pre-scan results
-            # If we have classification results, add focused instructions
-            classification_info = ""
-            reduced_iterations = False
+            # Build dynamic system prompt based on what's found/missing
+            use_focused_prompt = False
+            active_system_prompt = SYSTEM_PROMPT
 
             if classification_result and classification_result.found_types:
-                # Some documents found - tell agent what's already done
+                missing_types = classification_result.missing_types
+                focused_prompt = build_focused_system_prompt(
+                    classification_result=classification_result,
+                    missing_types=missing_types,
+                )
+                active_system_prompt = focused_prompt
+                use_focused_prompt = True
+                self._log(f"🎯 Dynamische prompt: gefocust op {len(missing_types)} missende documenten")
+
+            # Build initial message with pre-scan results and classification status
+            classification_info = ""
+            if classification_result and classification_result.found_types:
                 classification_info = "\n\n" + "=" * 60 + "\n"
                 classification_info += "🎯 PRE-SCAN CLASSIFICATIE RESULTATEN:\n"
                 classification_info += "=" * 60 + "\n"
@@ -1082,11 +1311,6 @@ class ClaudeAgent:
                 classification_info += "\n\n"
                 classification_info += classification_result.get_missing_prompt_section()
                 classification_info += "\n" + "=" * 60
-
-                # Reduce max iterations when we only need to find a few things
-                if len(classification_result.missing_types) <= 2:
-                    reduced_iterations = True
-                    self._log(f"📉 Verlaagde iteraties: slechts {len(classification_result.missing_types)} documenten te vinden")
 
             user_message = f"""
 Vind informatie voor de beurs: {input_data.fair_name}
@@ -1100,8 +1324,20 @@ Vind informatie voor de beurs: {input_data.fair_name}
 {'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] and not classification_result else 'Navigeer door de website en vind alle gevraagde documenten.'}
 """
 
-            # Reduce iterations if we only need a few more documents
-            effective_max_iterations = 15 if reduced_iterations else self.max_iterations
+            # Smart iteration limits based on how many documents are missing
+            if classification_result:
+                n_missing = len(classification_result.missing_types)
+                if n_missing <= 1:
+                    effective_max_iterations = 10
+                elif n_missing <= 2:
+                    effective_max_iterations = 15
+                elif n_missing <= 3:
+                    effective_max_iterations = 20
+                else:
+                    effective_max_iterations = 25  # Reduced from 40
+                self._log(f"📉 Iteratie-limiet: {effective_max_iterations} (voor {n_missing} missende documenten)")
+            else:
+                effective_max_iterations = self.max_iterations
 
             # Get initial screenshot
             screenshot = await self.browser.screenshot()
@@ -1135,33 +1371,36 @@ Vind informatie voor de beurs: {input_data.fair_name}
                 iteration += 1
                 self._log(f"Iteration {iteration}/{effective_max_iterations}")
 
-                # Mid-point check - encourage deeper exploration
-                if iteration == 20:
+                # Dynamic mid-point check - at ~60% of iterations
+                midpoint = max(5, effective_max_iterations * 3 // 5)
+                remaining_at_mid = effective_max_iterations - midpoint
+                if iteration == midpoint:
+                    mid_msg = f"📊 TUSSENTIJDSE CHECK (iteratie {midpoint}/{effective_max_iterations}):\n\n"
+                    if use_focused_prompt and classification_result:
+                        missing_str = ", ".join(classification_result.missing_types)
+                        mid_msg += f"Je zoekt nog naar: {missing_str}\n\n"
+                        mid_msg += "Heb je al geprobeerd:\n"
+                        mid_msg += "1. Downloads/Documents/Downloadcenter pagina\n"
+                        mid_msg += "2. Externe exhibitor portals (my.site.com, OEM)\n"
+                        mid_msg += "3. Alle accordion/dropdown items geopend\n"
+                        mid_msg += "4. deep_scan gebruikt op relevante pagina's\n"
+                    else:
+                        mid_msg += "Heb je AL deze secties bezocht?\n"
+                        mid_msg += "1. Exhibitor/For Exhibitors sectie\n"
+                        mid_msg += "2. Downloads/Documents/Service Documentation\n"
+                        mid_msg += "3. Participate / How to exhibit sectie\n"
+                        mid_msg += "4. Subdomeinen (exhibitors.xxx.com)\n"
+                    mid_msg += f"\nJe hebt nog {remaining_at_mid} acties - gebruik ze gericht!"
                     messages.append({
                         "role": "user",
-                        "content": [{"type": "text", "text": """📊 TUSSENTIJDSE CHECK (iteratie 20/40):
-
-Heb je AL deze secties al bezocht?
-1. ✓ Exhibitor/For Exhibitors sectie
-2. ✓ Downloads/Documents/Service Documentation
-3. ✓ Technical regulations / Stand design provisions
-4. ✓ Participate / How to exhibit sectie
-5. ✓ Subdomeinen (exhibitors.xxx.com)
-
-Als je NOG NIET alle documenten hebt gevonden:
-- Zoek naar "Technical regulations" of "Provisions for stand design" links
-- Klik op ALLE accordion/dropdown items (+ of ▼ icons)
-- Scroll volledig door download pagina's
-- Probeer alternatieve paden: /en/exhibitors, /services, /participate
-
-Je hebt nog 20 acties - gebruik ze om DIEPER te zoeken!"""}],
+                        "content": [{"type": "text", "text": mid_msg}],
                     })
 
                 # Warn agent to wrap up when approaching limit
-                if iteration == self.max_iterations - 5:
+                if iteration == effective_max_iterations - 3:
                     messages.append({
                         "role": "user",
-                        "content": [{"type": "text", "text": """⚠️ Je hebt nog 5 acties over. Begin nu met je JSON samenvatting.
+                        "content": [{"type": "text", "text": """⚠️ Je hebt nog 3 acties over. Begin nu met je JSON samenvatting.
 
 BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan de criteria voldoet!
 - Als een document NIET aan de criteria voldeed, zet url op null en leg uit waarom in validation
@@ -1169,11 +1408,11 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 - Bij twijfel: "NIET GEVONDEN" is beter dan een verkeerd document accepteren"""}],
                     })
 
-                # Call Claude with computer use
+                # Call Claude with computer use (dynamic prompt when classification available)
                 response = self.client.beta.messages.create(
                     model="claude-sonnet-4-20250514",
                     max_tokens=4096,
-                    system=SYSTEM_PROMPT,
+                    system=active_system_prompt,
                     betas=["computer-use-2025-01-24"],
                     tools=[
                         {
