@@ -696,6 +696,81 @@ class BrowserController:
             'all_links': all_links
         }
 
+    async def extract_navigation_links(self) -> List[LinkInfo]:
+        """Extract links from the site's main navigation (header, nav elements).
+
+        These represent the site's own structure and should always be followed,
+        regardless of whether they match document keywords. This helps discover
+        pages like "Show Layout", "Exhibiting", "Stand Build" that may not match
+        hardcoded keyword patterns.
+        """
+        if not self._page:
+            return []
+
+        try:
+            nav_links = await self._page.evaluate('''() => {
+                const results = [];
+                const seen = new Set();
+
+                // Selectors for navigation containers (ordered by specificity)
+                const navSelectors = [
+                    'nav a[href]',
+                    'header a[href]',
+                    '[role="navigation"] a[href]',
+                    '.nav a[href]', '.navbar a[href]',
+                    '.main-nav a[href]', '.main-menu a[href]',
+                    '.primary-nav a[href]', '.site-nav a[href]',
+                    '.menu a[href]', '.top-menu a[href]',
+                    '#main-navigation a[href]', '#primary-menu a[href]',
+                ];
+
+                for (const selector of navSelectors) {
+                    try {
+                        document.querySelectorAll(selector).forEach(a => {
+                            const href = a.getAttribute('href') || '';
+                            const text = (a.textContent || '').trim();
+                            if (href.length > 1 && !seen.has(href) && text.length > 0 && text.length < 100) {
+                                seen.add(href);
+                                results.push({href, text});
+                            }
+                        });
+                    } catch(e) {}
+                }
+
+                return results;
+            }''')
+
+            base_url = self._page.url
+            parsed_base = urlparse(base_url)
+            result = []
+
+            for link in nav_links:
+                href = link['href']
+                text = link['text']
+
+                # Convert relative to absolute
+                if href.startswith('/'):
+                    full_url = f"{parsed_base.scheme}://{parsed_base.netloc}{href}"
+                elif not href.startswith('http'):
+                    full_url = urljoin(base_url, href)
+                else:
+                    full_url = href
+
+                # Skip fragment-only links, javascript: etc
+                if href.startswith('#') or href.startswith('javascript:'):
+                    continue
+
+                result.append(LinkInfo(
+                    url=full_url,
+                    text=text[:80],
+                    is_pdf=full_url.lower().endswith('.pdf')
+                ))
+
+            return result
+
+        except Exception:
+            return []
+
     async def extract_emails(self) -> List[ExtractedEmail]:
         """Extract email addresses from the current page."""
         import re

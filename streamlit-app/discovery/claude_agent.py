@@ -4,6 +4,7 @@ Python implementation using the Anthropic SDK.
 """
 
 import asyncio
+import base64
 import json
 import re
 import socket
@@ -625,7 +626,7 @@ class ClaudeAgent:
 
         # Add common exhibitor/service page patterns (lower priority)
         generic_paths = [
-            # English
+            # English - core exhibitor pages
             '/en/exhibitors', '/exhibitors', '/en/participate', '/participate',
             '/en/services', '/services', '/en/downloads', '/downloads',
             '/en/information', '/information', '/en/planning', '/planning',
@@ -635,9 +636,22 @@ class ClaudeAgent:
             '/exhibitor-info', '/exhibitor-resources', '/exhibitor-guide',
             '/exhibitor-list', '/exhibitor-directory',
             '/venue-information', '/logistics',
+            # English - expanded (commonly missed paths)
+            '/exhibiting', '/en/exhibiting', '/exhibit',
+            '/show-layout', '/floor-plan', '/floorplan',
+            '/stand-build-information', '/stand-build',
+            '/contractor-information', '/contractor-manual',
+            '/documents', '/document-library', '/document-centre',
+            '/practical-information', '/practical-info',
+            '/visitor-exhibitor', '/get-involved', '/book-a-stand',
+            '/about-the-show', '/about-the-event',
+            '/why-exhibit', '/how-to-exhibit',
+            '/show-information', '/event-information',
+            '/preparation', '/exhibitor-preparation',
             # German
             '/aussteller', '/de/aussteller', '/technik', '/de/technik',
             '/de/downloads', '/de/aussteller-services',
+            '/standplanung', '/messeplanung',
             # French
             '/fr/exposants', '/exposants', '/fr/participer', '/participer',
             '/fr/services', '/fr/telechargements',
@@ -690,6 +704,7 @@ class ClaudeAgent:
         ]
 
         found_pages_to_scan = []  # Pages found that we should also scan
+        nav_pages_to_scan = []   # Navigation links from homepage (highest priority)
 
         # Create a lightweight browser for pre-scanning
         pre_scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)  # Smaller viewport for speed
@@ -699,13 +714,31 @@ class ClaudeAgent:
             self._log("Pre-scan browser launched")
 
             # First pass: scan initial URLs
-            for url in urls_to_scan[:20]:  # Increased limit to ensure document pages are scanned
+            for url_idx, url in enumerate(urls_to_scan[:20]):  # Increased limit to ensure document pages are scanned
                 try:
                     await pre_scan_browser.goto(url)
                     await asyncio.sleep(0.5)  # Let JavaScript execute
 
                     current_state = await pre_scan_browser.get_state()
                     self._log(f"  ✓ Scanning: {url}")
+
+                    # === STRUCTURAL: Extract navigation links from the homepage ===
+                    # Follow the site's OWN navigation structure instead of guessing paths.
+                    # This catches pages like "Show Layout", "Exhibiting", "Stand Build Info"
+                    # that don't match hardcoded keyword patterns.
+                    if url_idx == 0:  # Only for the first URL (homepage/base URL)
+                        try:
+                            nav_links = await pre_scan_browser.extract_navigation_links()
+                            for nav_link in nav_links:
+                                nav_host = urlparse(nav_link.url).netloc.lower()
+                                # Only follow same-domain navigation links
+                                if nav_host == base_netloc.lower():
+                                    if nav_link.url not in urls_to_scan and nav_link.url not in nav_pages_to_scan:
+                                        nav_pages_to_scan.append(nav_link.url)
+                            if nav_pages_to_scan:
+                                self._log(f"    🧭 Extracted {len(nav_pages_to_scan)} navigation links from homepage")
+                        except Exception:
+                            pass
 
                     # Get all links (this expands accordions and extracts with JS)
                     relevant_links = await pre_scan_browser.get_relevant_links()
@@ -1013,14 +1046,28 @@ class ClaudeAgent:
                     # Silently skip failed URLs
                     continue
 
-            # Second pass: scan discovered document pages (might contain hidden PDFs)
-            scanned_in_second_pass = 0
-            for url in found_pages_to_scan[:15]:  # Increased limit for cross-domain pages
-                try:
-                    # Skip already scanned URLs
-                    if url in urls_to_scan[:20]:
-                        continue
+            # Second pass: scan discovered pages
+            # Priority order: (1) navigation links from homepage, (2) keyword-matched document pages
+            # Navigation links are highest priority because they represent the site's own structure
+            # and catch pages like "Show Layout", "Exhibiting" that keywords might miss.
+            second_pass_urls = []
+            seen_second_pass = set(urls_to_scan[:20])
 
+            # First add navigation links (highest priority — site's own structure)
+            for nav_url in nav_pages_to_scan:
+                if nav_url not in seen_second_pass:
+                    second_pass_urls.append(nav_url)
+                    seen_second_pass.add(nav_url)
+
+            # Then add keyword-matched document pages
+            for doc_url in found_pages_to_scan:
+                if doc_url not in seen_second_pass:
+                    second_pass_urls.append(doc_url)
+                    seen_second_pass.add(doc_url)
+
+            scanned_in_second_pass = 0
+            for url in second_pass_urls[:25]:  # Increased from 15 to 25 for better coverage
+                try:
                     # Skip listing pages, individual company profiles, fragments, and login redirects
                     lower_url = url.lower()
                     if '?pagenumber=' in lower_url or '?anno=' in lower_url or '?page=' in lower_url:
@@ -1321,9 +1368,21 @@ class ClaudeAgent:
                         })
                         self._log(f"    📝 Extracted portal home page: {len(main_text)} chars")
 
-                    # Get all links from the portal
+                    # Get all links from the portal (regular + navigation)
                     relevant_links = await scan_browser.get_relevant_links()
                     all_links = relevant_links.get('all_links', [])
+
+                    # Also extract navigation links — Salesforce SPAs often render
+                    # navigation via JavaScript that regular link extraction misses
+                    try:
+                        nav_links = await scan_browser.extract_navigation_links()
+                        nav_urls_seen = {l.url for l in all_links}
+                        for nav_link in nav_links:
+                            if nav_link.url not in nav_urls_seen:
+                                all_links.append(nav_link)
+                                nav_urls_seen.add(nav_link.url)
+                    except Exception:
+                        pass
 
                     # Also add PDF links found on the portal
                     for link in relevant_links.get('pdf_links', []):
@@ -1335,28 +1394,40 @@ class ClaudeAgent:
                             'is_pdf': True,
                         })
 
-                    # Follow internal links that match document keywords
+                    # Follow internal links — prioritize keyword matches but also
+                    # follow all same-domain navigation links (site's own structure)
                     visited = {portal_url}
                     sub_pages_scanned = 0
 
+                    # Sort links: keyword matches first, then others
+                    keyword_links = []
+                    other_links = []
                     for link in all_links:
-                        if sub_pages_scanned >= 8:  # Max 8 sub-pages per portal
-                            break
-
                         link_lower = (link.text or '').lower() + ' ' + link.url.lower()
                         link_domain = urlparse(link.url).netloc
 
-                        # Only follow links on the same portal domain
                         if link_domain != portal_domain:
                             continue
-
-                        # Skip already visited
                         if link.url in visited:
                             continue
 
-                        # Check if the link text/URL contains relevant keywords
                         has_keyword = any(kw in link_lower for kw in page_keywords)
-                        if not has_keyword:
+                        if has_keyword:
+                            keyword_links.append(link)
+                        else:
+                            other_links.append(link)
+
+                    # Follow keyword links first (up to 8), then remaining nav links (up to 4 more)
+                    links_to_follow = keyword_links[:8] + other_links[:4]
+
+                    for link in links_to_follow:
+                        if sub_pages_scanned >= 12:  # Increased from 8 to 12
+                            break
+
+                        link_domain = urlparse(link.url).netloc
+                        if link_domain != portal_domain:
+                            continue
+                        if link.url in visited:
                             continue
 
                         visited.add(link.url)
@@ -1406,7 +1477,13 @@ class ClaudeAgent:
                         p.get('detected_type') == 'schedule' and p.get('text_content')
                         for p in portal_pages
                     )
-                    if not schedule_already_found and 'my.site.com' in portal_domain:
+                    # Probe schedule URLs on Salesforce portals AND other known portal types
+                    is_probeable_portal = (
+                        'my.site.com' in portal_domain or
+                        'cvent.com' in portal_domain or
+                        any(ind in portal_domain for ind in ['a2zinc', 'swapcard', 'grip.events'])
+                    )
+                    if not schedule_already_found and is_probeable_portal:
                         # Extract portal base path (e.g., /mwcoem/s from /mwcoem/s/Home)
                         parsed_portal = urlparse(portal_url)
                         path_parts = parsed_portal.path.strip('/').split('/')
@@ -1424,14 +1501,21 @@ class ClaudeAgent:
                                 'build-up-dismantling-schedule',
                                 'build-up-schedule',
                                 'build-up-dismantling',
+                                'build-up-and-dismantling',
+                                'build-up-tear-down',
                                 'schedule',
                                 'deadline',
                                 'deadlines',
+                                'important-dates',
+                                'key-dates',
                                 'access-policy',
                                 'event-schedule',
                                 'timetable',
                                 'set-up-dismantling',
                                 'setup-dismantling',
+                                'move-in-move-out',
+                                'move-in',
+                                'logistics',
                             ]
                             self._log(f"    🔎 Probing {len(schedule_slug_candidates)} schedule URL patterns on portal...")
                             for slug in schedule_slug_candidates:
@@ -1511,6 +1595,8 @@ class ClaudeAgent:
             'event-schedule', 'event schedule', 'build-up-schedule',
             'dismantling-schedule', 'tear-down-schedule', 'move-in-schedule',
             'setup-schedule', '/deadline', 'access-policy', 'timetable',
+            'important-dates', 'important dates', 'key-dates', 'key dates',
+            'move-in-move-out', 'move-in schedule',
             'aufbau-und-abbau', 'opbouw-en-afbouw',
         ]):
             return 'schedule'
@@ -1660,8 +1746,9 @@ class ClaudeAgent:
     async def _web_search_for_portals(self, fair_name: str) -> dict:
         """
         Search the web for exhibitor portals and event manuals.
-        Uses DuckDuckGo HTML search via Playwright browser (urllib is blocked
-        in some production environments).
+        Uses Bing search (primary) with DuckDuckGo as fallback via Playwright.
+        DDG's no-JS endpoint now returns CAPTCHAs to headless browsers,
+        so Bing is the default search engine.
 
         Returns dict with 'pdf_links' and 'portal_urls'.
         """
@@ -1677,17 +1764,15 @@ class ClaudeAgent:
         year_match = re.search(r'20\d{2}', fair_name)
         year_str = year_match.group(0) if year_match else "2026"
 
-        # Search queries to try - more diverse to catch portals
+        # Search queries to try
         search_queries = [
             f"{clean_name} {year_str} exhibitor manual PDF",
-            f"{clean_name} online event manual OEM",
+            f"{clean_name} {year_str} stand build rules regulations",
             f"{clean_name} {year_str} exhibitor portal",
-            f"{clean_name} stand build rules regulations {year_str}",
-            f"{clean_name} exhibitor welcome pack",
-            f'"{clean_name}" site:my.site.com OR site:salesforce.com',
+            f"{clean_name} online event manual OEM exhibitor",
         ]
 
-        # Domains we're interested in (external portals)
+        # Domains we're interested in (external portals + CDN providers)
         interesting_domains = [
             'my.site.com',      # Salesforce community
             'force.com',        # Salesforce
@@ -1707,6 +1792,7 @@ class ClaudeAgent:
             'dashboards.events',    # Exhibitor dashboards
             'onlineexhibitormanual.com',  # OEM platform
             'gevme.com',        # Gevme events
+            'asp.events',       # ASP Events CDN (common fair CMS)
         ]
 
         # Also interested in any PDF that matches fair-related keywords
@@ -1714,39 +1800,82 @@ class ClaudeAgent:
             'exhibitor', 'manual', 'welcome', 'technical', 'regulation',
             'guideline', 'stand-build', 'standbuild', 'floorplan', 'floor-plan',
             'getting-started', 'rules', 'schedule', 'event-info', 'handbook',
-            'terms_and_conditions', 'terms-and-conditions',
+            'terms_and_conditions', 'terms-and-conditions', 'contractor',
+            'working-safely', 'safety-guideline', 'stand-build-information',
         ]
 
         # Add fair name words as dynamic PDF keywords
-        # e.g. "GreenTech Amsterdam" -> also match PDFs containing "greentech" or "amsterdam"
         name_words = clean_name.lower().split()
         stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
                      'fair', 'trade', 'show', 'exhibition', 'expo', 'messe', 'fiera', 'salon'}
         for word in name_words:
-            if word not in stop_words and len(word) >= 4:
+            if word not in stop_words and len(word) >= 3:
                 fair_pdf_keywords.append(word)
 
-        # Launch a lightweight Playwright browser for searches with JS DISABLED.
-        # DuckDuckGo's html.duckduckgo.com/html/ is a no-JS endpoint that returns
-        # static HTML with result__a links. With JS enabled, DDG redirects to its
-        # JS-rendered version which has completely different HTML structure.
-        # We use direct Playwright API (not BrowserController) to set java_script_enabled=False.
+        # URL keyword matching for non-PDF results (portals, important pages)
+        url_keywords = [
+            'exhibitor', 'oem', 'event-manual', 'eventmanual',
+            'stand-build', 'welcome-pack', 'welcomepack',
+            'technical-regulation', 'technical-guideline',
+            'contractor', 'stand-information', 'exhibiting',
+        ]
+
+        def _is_useful_result(decoded_url: str) -> bool:
+            """Check if a search result URL is relevant to fair document discovery."""
+            try:
+                parsed = urlparse(decoded_url)
+                host = parsed.netloc.lower()
+                path_lower = parsed.path.lower()
+                url_lower = decoded_url.lower()
+
+                # Skip search engine pages
+                if any(se in host for se in ['bing.com', 'google.', 'duckduckgo', 'yahoo.']):
+                    return False
+
+                # Domain whitelist (portals, CDNs)
+                if any(domain in host for domain in interesting_domains):
+                    return True
+
+                # URL contains exhibitor/document keywords
+                if any(kw in url_lower for kw in url_keywords):
+                    return True
+
+                # PDF with fair-related keywords
+                if (path_lower.endswith('.pdf') or '.pdf?' in path_lower) and \
+                   any(kw in url_lower for kw in fair_pdf_keywords):
+                    return True
+
+                return False
+            except Exception:
+                return False
+
+        def _add_result(decoded_url: str) -> None:
+            """Add a search result to the appropriate list."""
+            try:
+                parsed = urlparse(decoded_url)
+                path_lower = parsed.path.lower()
+
+                if path_lower.endswith('.pdf') or '.pdf?' in path_lower:
+                    if decoded_url not in found_pdfs:
+                        found_pdfs.append(decoded_url)
+                        self._log(f"    📄 Web search found PDF: {decoded_url[:80]}...")
+                else:
+                    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                    if clean_url not in found_portals:
+                        found_portals.append(clean_url)
+            except Exception:
+                pass
+
+        # Launch a Playwright browser for web searches
         from playwright.async_api import async_playwright as _async_pw
         _pw = None
         _search_browser = None
-        _search_page = None
         try:
             _pw = await _async_pw().start()
             _search_browser = await _pw.chromium.launch(
                 headless=True,
                 args=['--no-sandbox', '--disable-setuid-sandbox']
             )
-            _search_context = await _search_browser.new_context(
-                viewport={'width': 800, 'height': 600},
-                java_script_enabled=False,
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            )
-            _search_page = await _search_context.new_page()
         except Exception as e:
             self._log(f"    ⚠️ Could not launch search browser: {e}")
             if _search_browser:
@@ -1756,93 +1885,149 @@ class ClaudeAgent:
             return {'pdf_links': [], 'portal_urls': []}
 
         try:
-            for qi, query in enumerate(search_queries[:4]):  # Check 4 searches
+            # === PRIMARY: Bing search (reliable, no CAPTCHA for basic queries) ===
+            bing_context = await _search_browser.new_context(
+                viewport={'width': 1024, 'height': 768},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            )
+            bing_page = await bing_context.new_page()
+            bing_worked = False
+
+            for qi, query in enumerate(search_queries[:4]):
                 try:
-                    self._log(f"    🔍 Web search: '{query}'")
+                    self._log(f"    🔍 Bing search: '{query}'")
                     encoded_query = urllib.parse.quote_plus(query)
-                    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+                    search_url = f"https://www.bing.com/search?q={encoded_query}&count=20"
 
                     try:
-                        await _search_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
-                        html = await _search_page.content()
+                        await bing_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
+                        await asyncio.sleep(1)  # Let results render
+                        html = await bing_page.content()
                     except Exception as e:
-                        self._log(f"    Web search error: {e}")
+                        self._log(f"    Bing search error: {e}")
                         continue
 
-                    if not html:
+                    if not html or len(html) < 1000:
                         continue
 
-                    # Extract URLs from DuckDuckGo results
-                    # DDG's no-JS HTML endpoint returns results in <a class="result__a"> links.
-                    # href format varies:
-                    # - Direct URLs: href="https://example.com/..."
-                    # - Redirect URLs: href="//duckduckgo.com/l/?uddg=https%3A%2F%2F..."
-                    raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
-                    if not raw_hrefs:
-                        # Fallback: scan entire HTML for uddg= parameters
-                        raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
-                    if not raw_hrefs:
-                        # Second fallback: look for any <a> hrefs with uddg in them
-                        raw_hrefs = re.findall(r'href="([^"]*uddg=[^"]*)"', html)
+                    # Check for Bing CAPTCHA
+                    if 'captcha' in html.lower() or 'unusual traffic' in html.lower():
+                        self._log(f"    ⚠️ Bing CAPTCHA detected, skipping remaining queries")
+                        break
 
-                    self._log(f"    DDG returned {len(raw_hrefs)} raw result links")
+                    # Parse Bing results
+                    # Bing uses redirect URLs: /ck/a?...&u=a1{base64_encoded_url}&ntb=1
+                    # Extract the 'u' parameter and decode the base64 URL
+                    bing_urls = []
 
-                    # Resolve each href to its actual URL
-                    matches = []
-                    for href in raw_hrefs:
-                        uddg_match = re.search(r'uddg=([^&"]+)', href)
-                        if uddg_match:
-                            matches.append(urllib.parse.unquote(uddg_match.group(1)))
-                        elif href.startswith('http'):
-                            matches.append(href)
-
-                    for match in matches:
+                    # Method 1: Extract from Bing redirect URLs
+                    bing_redirects = re.findall(r'href="https?://www\.bing\.com/ck/a\?[^"]*?u=([^&"]+)', html)
+                    for encoded_u in bing_redirects:
                         try:
-                            decoded_url = urllib.parse.unquote(match)
-                            parsed = urlparse(decoded_url)
-                            host = parsed.netloc.lower()
-                            path_lower = parsed.path.lower()
-
-                            # Skip non-interesting domains
-                            is_interesting = any(domain in host for domain in interesting_domains)
-                            has_keywords = any(kw in decoded_url.lower() for kw in [
-                                'exhibitor', 'oem', 'event-manual', 'eventmanual',
-                                'stand-build', 'welcome-pack', 'welcomepack',
-                                'technical-regulation', 'technical-guideline',
-                            ])
-                            # Also catch any PDF with fair-related keywords
-                            is_fair_pdf = (
-                                path_lower.endswith('.pdf') and
-                                any(kw in decoded_url.lower() for kw in fair_pdf_keywords)
-                            )
-
-                            if not (is_interesting or has_keywords or is_fair_pdf):
-                                continue
-                            if 'duckduckgo' in host:
-                                continue
-
-                            # Check if it's a PDF
-                            if path_lower.endswith('.pdf'):
-                                # Keep full URL for PDFs
-                                if decoded_url not in found_pdfs:
-                                    found_pdfs.append(decoded_url)
-                                    self._log(f"    📄 Web search found PDF: {decoded_url[:80]}...")
-                            else:
-                                # For portals, clean the URL
-                                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                                if clean_url not in found_portals:
-                                    found_portals.append(clean_url)
-
+                            decoded_u = urllib.parse.unquote(encoded_u)
+                            # Bing encodes with a1 prefix + base64
+                            if decoded_u.startswith('a1'):
+                                url_bytes = base64.b64decode(decoded_u[2:] + '==')
+                                actual_url = url_bytes.decode('utf-8', errors='ignore')
+                                if actual_url.startswith('http'):
+                                    bing_urls.append(actual_url)
                         except Exception:
                             continue
 
+                    # Method 2: Extract cite/display URLs (shown below results)
+                    cite_urls = re.findall(r'<cite[^>]*>(?:<span[^>]*>)?([^<]+)', html)
+                    for cite in cite_urls:
+                        cite_clean = re.sub(r'<[^>]+>', '', cite).strip()
+                        if cite_clean.startswith('http'):
+                            bing_urls.append(cite_clean)
+                        elif '.' in cite_clean and '/' in cite_clean:
+                            bing_urls.append(f"https://{cite_clean}")
+
+                    # Method 3: Direct href links to external sites
+                    direct_hrefs = re.findall(r'href="(https?://(?!www\.bing\.com)[^"]+)"', html)
+                    bing_urls.extend(direct_hrefs)
+
+                    # Deduplicate
+                    seen_urls = set()
+                    unique_urls = []
+                    for url in bing_urls:
+                        url_clean = url.split('#')[0].rstrip('/')
+                        if url_clean not in seen_urls:
+                            seen_urls.add(url_clean)
+                            unique_urls.append(url)
+
+                    self._log(f"    Bing returned {len(unique_urls)} unique URLs")
+
+                    for url in unique_urls:
+                        if _is_useful_result(url):
+                            _add_result(url)
+                            bing_worked = True
+
                 except Exception as e:
-                    self._log(f"    Web search error: {e}")
+                    self._log(f"    Bing search error: {e}")
                     continue
 
-                # Small delay between queries to avoid rate limiting
                 if qi < 3:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(1.0)
+
+            await bing_context.close()
+
+            # === FALLBACK: DuckDuckGo (if Bing returned nothing) ===
+            if not bing_worked:
+                self._log(f"    🔄 Bing returned no results, trying DuckDuckGo fallback...")
+                ddg_context = await _search_browser.new_context(
+                    viewport={'width': 800, 'height': 600},
+                    java_script_enabled=False,
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                )
+                ddg_page = await ddg_context.new_page()
+
+                for qi, query in enumerate(search_queries[:3]):
+                    try:
+                        encoded_query = urllib.parse.quote_plus(query)
+                        search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+
+                        try:
+                            await ddg_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
+                            html = await ddg_page.content()
+                        except Exception:
+                            continue
+
+                        if not html:
+                            continue
+
+                        # Check for DDG CAPTCHA
+                        if 'captcha' in html.lower() or 'robot' in html.lower():
+                            self._log(f"    ⚠️ DDG CAPTCHA detected — web search unavailable")
+                            self._sd['warnings'].append('DDG en Bing beide geblokkeerd (CAPTCHA)')
+                            break
+
+                        # Parse DDG results
+                        raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+                        if not raw_hrefs:
+                            raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+
+                        for href in raw_hrefs:
+                            uddg_match = re.search(r'uddg=([^&"]+)', href)
+                            if uddg_match:
+                                decoded = urllib.parse.unquote(uddg_match.group(1))
+                            elif href.startswith('http'):
+                                decoded = href
+                            else:
+                                continue
+
+                            decoded = urllib.parse.unquote(decoded)
+                            if _is_useful_result(decoded):
+                                _add_result(decoded)
+
+                    except Exception:
+                        continue
+
+                    if qi < 2:
+                        await asyncio.sleep(1.5)
+
+                await ddg_context.close()
+
         finally:
             try:
                 if _search_browser:
@@ -1863,8 +2048,8 @@ class ClaudeAgent:
             self._log(f"    ⚠️ Web search returned no useful results")
 
         return {
-            'pdf_links': found_pdfs[:5],
-            'portal_urls': found_portals[:5]
+            'pdf_links': found_pdfs[:8],
+            'portal_urls': found_portals[:8]
         }
 
     async def _probe_portal_urls(self, base_url: str, fair_name: str) -> List[str]:
@@ -3323,21 +3508,20 @@ Kind regards,
             output.official_url = input_data.known_url
             output.official_domain = urlparse(input_data.known_url).netloc
 
-        # Map classified documents to output (ONLY strong confidence counts)
-        if classification.floorplan and classification.floorplan.confidence == 'strong':
-            output.documents.floorplan_url = classification.floorplan.url
-            output.quality.floorplan = "strong"
-            output.primary_reasoning.floorplan = f"PRE-SCAN GEVALIDEERD: {classification.floorplan.reason} (jaar: {classification.floorplan.year_verified}, beurs: {classification.floorplan.fair_verified})"
-
-        if classification.exhibitor_manual and classification.exhibitor_manual.confidence == 'strong':
-            output.documents.exhibitor_manual_url = classification.exhibitor_manual.url
-            output.quality.exhibitor_manual = "strong"
-            output.primary_reasoning.exhibitor_manual = f"PRE-SCAN GEVALIDEERD: {classification.exhibitor_manual.reason} (jaar: {classification.exhibitor_manual.year_verified}, beurs: {classification.exhibitor_manual.fair_verified})"
-
-        if classification.rules and classification.rules.confidence == 'strong':
-            output.documents.rules_url = classification.rules.url
-            output.quality.rules = "strong"
-            output.primary_reasoning.rules = f"PRE-SCAN GEVALIDEERD: {classification.rules.reason} (jaar: {classification.rules.year_verified}, beurs: {classification.rules.fair_verified})"
+        # Map classified documents to output (STRONG and PARTIAL confidence)
+        # PARTIAL documents are still valuable to show to the user — they just
+        # don't count toward the quality gate threshold for skipping the agent.
+        for doc_type, field_name in [
+            ('floorplan', 'floorplan_url'),
+            ('exhibitor_manual', 'exhibitor_manual_url'),
+            ('rules', 'rules_url'),
+        ]:
+            cls = getattr(classification, doc_type, None)
+            if cls and cls.confidence in ['strong', 'partial']:
+                setattr(output.documents, field_name, cls.url)
+                setattr(output.quality, doc_type, cls.confidence)
+                setattr(output.primary_reasoning, doc_type,
+                        f"PRE-SCAN GEVALIDEERD: {cls.reason} (jaar: {cls.year_verified}, beurs: {cls.fair_verified})")
 
         if classification.schedule and classification.schedule.confidence in ['strong', 'partial']:
             output.documents.schedule_page_url = classification.schedule.url
