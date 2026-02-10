@@ -335,6 +335,27 @@ class ClaudeAgent:
         self.on_status = on_status or (lambda x: None)
         self.on_phase = on_phase or (lambda x: None)
         self._discovery_log: List[str] = []  # Detailed log for troubleshooting
+        # Compact summary data collected during discovery for short shareable logs
+        self._sd: Dict[str, Any] = {
+            'prescan_pdfs': 0,
+            'prescan_pages': 0,
+            'prescan_emails': 0,
+            'subdomains_checked': 0,
+            'subdomains_found': [],
+            'web_search_pdfs': 0,
+            'web_search_portals': 0,
+            'portal_probe_found': [],
+            'portal_urls': [],
+            'portals_scanned': [],  # [{url, sub_pages, page_types}]
+            'classification': {},  # type -> {confidence, year, fair, url}
+            'quality_gate': '',
+            'quality_gate_passed': False,
+            'skip_agent': False,
+            'skip_agent_reason': '',
+            'agent_iterations': 0,
+            'warnings': [],
+            'errors': [],
+        }
 
     def _log(self, message: str) -> None:
         """Log a message and collect it for the discovery log."""
@@ -519,6 +540,8 @@ class ClaudeAgent:
                 if portal_url not in results['exhibitor_pages']:
                     results['exhibitor_pages'].insert(0, portal_url)  # Add at start for priority
 
+            self._sd['subdomains_checked'] = len(exhibitor_subdomains)
+            self._sd['subdomains_found'] = list(verified_subdomains)
             if verified_subdomains:
                 self._log(f"  Found {len(verified_subdomains)} active exhibitor portal subdomains")
 
@@ -527,6 +550,8 @@ class ClaudeAgent:
         if fair_name:
             self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
             web_search_results = await self._web_search_for_portals(fair_name)
+            self._sd['web_search_pdfs'] = len(web_search_results.get('pdf_links', []))
+            self._sd['web_search_portals'] = len(web_search_results.get('portal_urls', []))
 
             # Add found PDFs directly to pdf_links (these are high-value direct downloads)
             for pdf_url in web_search_results.get('pdf_links', []):
@@ -569,6 +594,7 @@ class ClaudeAgent:
         if fair_name:
             self._log(f"🔍 Probing common portal URL patterns...")
             probed_portals = await self._probe_portal_urls(base_url, fair_name)
+            self._sd['portal_probe_found'] = list(probed_portals)
             for portal_url in probed_portals:
                 if portal_url not in results['exhibitor_pages']:
                     results['exhibitor_pages'].insert(0, portal_url)
@@ -1438,8 +1464,18 @@ class ClaudeAgent:
 
                     self._log(f"  ✅ Portal scan complete: {sub_pages_scanned} sub-pages, {len([p for p in portal_pages if p.get('text_content')])} pages with content")
 
+                    # Track portal scan summary
+                    page_types = [p.get('detected_type', '?') for p in portal_pages
+                                  if p.get('text_content') and urlparse(p.get('url', '')).netloc == portal_domain]
+                    self._sd['portals_scanned'].append({
+                        'url': portal_url,
+                        'sub_pages': sub_pages_scanned,
+                        'page_types': page_types,
+                    })
+
                 except Exception as e:
                     self._log(f"  ⚠️ Portal scan error for {portal_url[:50]}: {e}")
+                    self._sd['warnings'].append(f"Portal scan error: {portal_url[:40]}: {e}")
                     continue
 
         finally:
@@ -1904,12 +1940,141 @@ class ClaudeAgent:
 
         return found
 
+    def _generate_discovery_summary(
+        self,
+        output: DiscoveryOutput,
+        input_data: TestCaseInput,
+        start_time: float,
+    ) -> List[str]:
+        """Generate a compact discovery summary for easy sharing and troubleshooting.
+
+        Contains all critical info from the full log in ~25-35 lines instead of 150+.
+        """
+        s = []
+        elapsed = int(time.time() - start_time)
+        domain = urlparse(input_data.known_url).netloc if input_data.known_url else '?'
+
+        # Header
+        s.append(f"=== DISCOVERY SUMMARY: {input_data.fair_name} ===")
+        s.append(f"URL: {domain} | {input_data.city or '?'} | {elapsed}s")
+        s.append("")
+
+        # Pre-scan
+        sd = self._sd
+        s.append(f"PRE-SCAN: {sd['prescan_pdfs']} PDFs, {sd['prescan_pages']} pages, {sd['prescan_emails']} emails")
+        if sd['subdomains_checked']:
+            found_str = ', '.join(sd['subdomains_found']) if sd['subdomains_found'] else 'geen'
+            s.append(f"  Subdomains: {len(sd['subdomains_found'])}/{sd['subdomains_checked']} actief ({found_str})")
+        ws_parts = []
+        if sd['web_search_pdfs']:
+            ws_parts.append(f"{sd['web_search_pdfs']} PDFs")
+        if sd['web_search_portals']:
+            ws_parts.append(f"{sd['web_search_portals']} portals")
+        s.append(f"  Web search: {', '.join(ws_parts) if ws_parts else 'geen resultaten'}")
+        if sd['portal_probe_found']:
+            s.append(f"  Portal probe: {', '.join(urlparse(u).netloc for u in sd['portal_probe_found'])}")
+
+        # Portal scan
+        if sd['portal_urls']:
+            s.append("")
+            s.append(f"PORTALS ({len(sd['portal_urls'])} gevonden, {len(sd['portals_scanned'])} gescand):")
+            for ps in sd['portals_scanned']:
+                url_short = urlparse(ps['url']).netloc + urlparse(ps['url']).path
+                if len(url_short) > 55:
+                    url_short = url_short[:55] + '...'
+                types_str = ' '.join(ps['page_types']) if ps['page_types'] else 'home only'
+                s.append(f"  {url_short} → {ps['sub_pages']} sub ({types_str})")
+            # Show portals that weren't scanned
+            scanned_urls = {ps['url'] for ps in sd['portals_scanned']}
+            for purl in sd['portal_urls']:
+                if purl not in scanned_urls:
+                    url_short = urlparse(purl).netloc + urlparse(purl).path
+                    if len(url_short) > 55:
+                        url_short = url_short[:55] + '...'
+                    s.append(f"  {url_short} → NIET GESCAND")
+
+        # Classification
+        s.append("")
+        s.append("CLASSIFICATIE:")
+        for dtype in ['floorplan', 'exhibitor_manual', 'rules', 'schedule', 'exhibitor_directory']:
+            cls_info = sd['classification'].get(dtype)
+            if cls_info:
+                conf = cls_info['confidence'].upper()
+                url_short = cls_info['url']
+                # Shorten URL for display
+                parsed_u = urlparse(url_short)
+                url_display = parsed_u.netloc + parsed_u.path
+                if len(url_display) > 60:
+                    url_display = '...' + url_display[-57:]
+                if dtype == 'exhibitor_directory':
+                    s.append(f"  {'✓'} {dtype:<22} {conf:<8} | {url_display}")
+                else:
+                    yr = '✓' if cls_info.get('year') else '✗'
+                    fr = '✓' if cls_info.get('fair') else '✗'
+                    s.append(f"  {'✓'} {dtype:<22} {conf:<8} yr={yr} fair={fr} | {url_display}")
+            else:
+                s.append(f"  {'✗'} {dtype:<22} NIET GEVONDEN")
+
+        # Quality gate
+        s.append("")
+        if sd['quality_gate']:
+            s.append(f"QUALITY GATE: {sd['quality_gate']}")
+        if sd['skip_agent']:
+            s.append(f"  → Browser agent OVERGESLAGEN")
+        elif sd['agent_iterations']:
+            s.append(f"  → Browser agent: {sd['agent_iterations']} iteraties")
+
+        # Schedule
+        bu = len(output.schedule.build_up)
+        td = len(output.schedule.tear_down)
+        if bu or td:
+            s.append(f"SCHEDULE: {bu} build-up + {td} tear-down entries")
+
+        # Contacts
+        n_emails = len(output.contact_info.emails)
+        rec = output.contact_info.recommended_email
+        if n_emails or rec:
+            parts = [f"{n_emails} emails"]
+            if rec:
+                parts.append(f"aanbevolen: {rec}")
+            s.append(f"CONTACTS: {', '.join(parts)}")
+
+        # Final result
+        s.append("")
+        s.append("RESULTAAT:")
+
+        def _url_short(url):
+            if not url:
+                return 'ONTBREEKT'
+            p = urlparse(url)
+            display = p.netloc + p.path
+            return ('...' + display[-57:]) if len(display) > 60 else display
+
+        s.append(f"  Floorplan:  {_url_short(output.documents.floorplan_url)}")
+        s.append(f"  Manual:     {_url_short(output.documents.exhibitor_manual_url)}")
+        s.append(f"  Rules:      {_url_short(output.documents.rules_url)}")
+        s.append(f"  Schedule:   {f'{bu} opbouw + {td} afbouw' if (bu or td) else _url_short(output.documents.schedule_page_url)}")
+        s.append(f"  Directory:  {_url_short(output.documents.exhibitor_directory_url)}")
+
+        # Warnings
+        if sd['warnings'] or sd['errors']:
+            s.append("")
+            s.append("WAARSCHUWINGEN:")
+            for w in sd['warnings']:
+                s.append(f"  ⚠ {w}")
+            for e in sd['errors']:
+                s.append(f"  ✗ {e}")
+
+        return s
+
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
         output = create_empty_output(input_data.fair_name)
         output.city = input_data.city
         output.country = input_data.country
         self._discovery_log = []  # Reset log for each run
+        self._sd = {k: ([] if isinstance(v, list) else ({} if isinstance(v, dict) else type(v)()))
+                    for k, v in self._sd.items()}  # Reset summary data
 
         start_time = time.time()
 
@@ -1938,9 +2103,12 @@ class ClaudeAgent:
             skip_browser_agent = False
 
             pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
-            self._log(f"Pre-scan resultaat: {len(pre_scan_results.get('pdf_links', []))} PDFs, "
-                     f"{len(pre_scan_results.get('exhibitor_pages', []))} exhibitor pagina's, "
-                     f"{len(pre_scan_results.get('emails', []))} emails")
+            self._sd['prescan_pdfs'] = len(pre_scan_results.get('pdf_links', []))
+            self._sd['prescan_pages'] = len(pre_scan_results.get('exhibitor_pages', []))
+            self._sd['prescan_emails'] = len(pre_scan_results.get('emails', []))
+            self._log(f"Pre-scan resultaat: {self._sd['prescan_pdfs']} PDFs, "
+                     f"{self._sd['prescan_pages']} exhibitor pagina's, "
+                     f"{self._sd['prescan_emails']} emails")
             # Log all found PDFs
             for pdf in pre_scan_results.get('pdf_links', []):
                 self._log(f"  PDF [{pdf.get('type', '?')}] [{pdf.get('year', '?')}]: {pdf.get('url', '?')[:80]}")
@@ -1957,6 +2125,7 @@ class ClaudeAgent:
             self._log("=" * 60)
             portal_pages = []
             portal_urls = self._find_portal_urls(pre_scan_results, fair_name=input_data.fair_name)
+            self._sd['portal_urls'] = list(portal_urls)
             self._log(f"Gevonden portal URLs: {len(portal_urls)}")
             for purl in portal_urls:
                 self._log(f"  Portal: {purl}")
@@ -1998,7 +2167,7 @@ class ClaudeAgent:
                     portal_pages=[p for p in portal_pages if p.get('text_content')],
                 )
 
-                # Log classification results
+                # Log and track classification results
                 self._log(f"Classificatie resultaat:")
                 self._log(f"  Gevonden types: {classification_result.found_types}")
                 self._log(f"  Missende types: {classification_result.missing_types}")
@@ -2006,10 +2175,19 @@ class ClaudeAgent:
                     cls = getattr(classification_result, dtype, None)
                     if cls:
                         self._log(f"  {dtype}: {cls.confidence} | year={cls.year_verified} | fair={cls.fair_verified} | url={cls.url[:70]}")
+                        self._sd['classification'][dtype] = {
+                            'confidence': cls.confidence,
+                            'year': cls.year_verified,
+                            'fair': cls.fair_verified,
+                            'url': cls.url,
+                        }
                     else:
                         self._log(f"  {dtype}: NIET GEVONDEN")
                 if classification_result.exhibitor_directory:
                     self._log(f"  exhibitor_directory: {classification_result.exhibitor_directory[:70]}")
+                    self._sd['classification']['exhibitor_directory'] = {
+                        'confidence': 'strong', 'url': classification_result.exhibitor_directory
+                    }
                 if classification_result.extra_urls_to_scan:
                     self._log(f"  Extra URLs te scannen: {classification_result.extra_urls_to_scan}")
 
@@ -2023,12 +2201,21 @@ class ClaudeAgent:
                     self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
                     skip_browser_agent = True
+                    self._sd['quality_gate'] = f"PASSED ({classification_result.skip_agent_reason})"
+                    self._sd['quality_gate_passed'] = True
+                    self._sd['skip_agent'] = True
+                    self._sd['skip_agent_reason'] = 'Alle docs + schema gevonden'
                 elif classification_result.skip_agent_safe and not schedule_found:
                     self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
                     self._log("   Maar schema ontbreekt — browser agent draait om schema te zoeken.")
+                    self._sd['quality_gate'] = f"PASSED maar schema mist"
+                    self._sd['quality_gate_passed'] = True
+                    self._sd['skip_agent_reason'] = 'Schema ontbreekt → agent draait'
                 else:
                     self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent draait voor extra validatie.")
+                    self._sd['quality_gate'] = f"FAILED ({classification_result.skip_agent_reason})"
+                    self._sd['skip_agent_reason'] = 'Te weinig STRONG docs → agent draait'
 
                 # PHASE 1.75: Secondary prescan for document references found in classified PDFs
                 self._log("")
@@ -2139,6 +2326,7 @@ class ClaudeAgent:
                 self._log(f"Schedule: {len(output.schedule.build_up)} opbouw + {len(output.schedule.tear_down)} afbouw entries")
                 self._log(f"Totale tijd: {int(time.time() - start_time)}s")
                 output.debug.discovery_log = list(self._discovery_log)
+                output.debug.discovery_summary = self._generate_discovery_summary(output, input_data, start_time)
                 return output
 
             # PHASE 2: Launch browser for visual verification
@@ -2496,8 +2684,10 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             self._log(f"Rules: {output.documents.rules_url or 'NIET GEVONDEN'}")
             self._log(f"Exhibitor Directory: {output.documents.exhibitor_directory_url or 'NIET GEVONDEN'}")
             self._log(f"Schedule: {len(output.schedule.build_up)} opbouw + {len(output.schedule.tear_down)} afbouw entries")
+            self._sd['agent_iterations'] = iteration
             self._log(f"Totale tijd: {int(time.time() - start_time)}s | Iteraties: {iteration}")
             output.debug.discovery_log = list(self._discovery_log)
+            output.debug.discovery_summary = self._generate_discovery_summary(output, input_data, start_time)
 
             # Add discovered emails to output (with deduplication)
             if pre_scan_results and pre_scan_results.get('emails'):
