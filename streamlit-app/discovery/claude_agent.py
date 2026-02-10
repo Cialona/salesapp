@@ -827,6 +827,7 @@ class ClaudeAgent:
                                 'eventbrite.',      # Eventbrite
                                 'a2zinc.net',       # A2Z event platform
                                 'expocad.',         # ExpoCad
+                                'expofp.',          # ExpoFP
                                 'map-dynamics.',    # Map Dynamics
                                 'n200.com',         # Nth Degree events
                                 'mapyourshow.com',  # Map Your Show
@@ -953,6 +954,8 @@ class ClaudeAgent:
                             'provision', 'guideline', 'regolamento', 'richtlin',
                             'exhibitor-service', 'download', 'document',
                             '/esporre', '/exhibit', '/partecipa',
+                            'deadline', 'floorplan', 'floor-plan',
+                            'general-regulation', 'voorschrift', 'standbouw',
                         ])
 
                         if url_has_keyword or text_has_keyword or is_document_page:
@@ -1119,6 +1122,7 @@ class ClaudeAgent:
             'cvent.com',           # Cvent
             'a2zinc.net',          # A2Z
             'expocad.',            # ExpoCad
+            'expofp.',             # ExpoFP
             'smallworldlabs.com',  # SWL
             'eventbrite.',         # Eventbrite
             'map-dynamics.',       # Map Dynamics
@@ -1237,6 +1241,7 @@ class ClaudeAgent:
             # Schedule
             'schedule', 'build-up', 'buildup', 'build up', 'tear-down', 'teardown',
             'dismantl', 'move-in', 'move-out', 'set-up', 'setup', 'timeline',
+            'deadline', 'access policy', 'timetable',
             'aufbau', 'abbau', 'montage', 'démontage', 'opbouw', 'afbouw',
             # Manual / guide
             'manual', 'handbook', 'guide', 'welcome', 'exhibitor info',
@@ -1395,14 +1400,15 @@ class ClaudeAgent:
         if any(kw in url_title for kw in [
             'event-schedule', 'event schedule', 'build-up-schedule',
             'dismantling-schedule', 'tear-down-schedule', 'move-in-schedule',
-            'setup-schedule', 'aufbau-und-abbau', 'opbouw-en-afbouw',
+            'setup-schedule', '/deadline', 'access-policy', 'timetable',
+            'aufbau-und-abbau', 'opbouw-en-afbouw',
         ]):
             return 'schedule'
 
         # Floorplan from URL/title
         if any(kw in url_title for kw in [
             'floorplan', 'floor-plan', 'floor plan', 'expo-floorplan',
-            'hall-plan', 'hallenplan', 'plattegrond', 'expocad', 'mapyourshow',
+            'hall-plan', 'hallenplan', 'plattegrond', 'expocad', 'expofp', 'mapyourshow',
             'planimetria',
         ]):
             return 'floorplan'
@@ -1450,7 +1456,7 @@ class ClaudeAgent:
         if any(kw in combined for kw in [
             'floor plan', 'floorplan', 'hall plan', 'site map', 'venue map',
             'exhibition layout', 'expo floorplan',
-            'hallenplan', 'plattegrond', 'expocad', 'mapyourshow',
+            'hallenplan', 'plattegrond', 'expocad', 'expofp', 'mapyourshow',
             'plan du salon', 'plan des halls',
             'plano de la feria', 'plano del recinto',
             'pianta del salone', 'planimetria',
@@ -1580,6 +1586,7 @@ class ClaudeAgent:
             'cvent.com',        # Cvent
             'a2zinc.net',       # A2Z events
             'expocad.com',      # ExpoCad
+            'expofp.com',       # ExpoFP
             'smallworldlabs.com',  # Small World Labs
             'eventbrite.',      # Eventbrite
             'map-dynamics.',    # Map Dynamics

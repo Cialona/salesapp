@@ -498,7 +498,7 @@ class DocumentClassifier:
 
             # Known floorplan providers: auto-classify as STRONG without LLM
             # These are definitively floorplans regardless of text content
-            known_floorplan_providers = ['expocad.com', 'a2zinc.net', 'mapyourshow.com', 'map-dynamics.']
+            known_floorplan_providers = ['expocad.com', 'a2zinc.net', 'mapyourshow.com', 'map-dynamics.', 'expofp.com']
             if mapped_type == 'floorplan' and any(fp in page_url.lower() for fp in known_floorplan_providers):
                 classification = DocumentClassification(
                     url=page_url,
@@ -605,25 +605,53 @@ class DocumentClassifier:
 
         if doc_type == 'exhibitor_manual':
             # Strong indicators for exhibitor manual
-            if any(kw in combined for kw in ['event rules', 'exhibitor manual', 'welcome pack', 'event manual']):
+            if any(kw in combined for kw in ['event rules', 'exhibitor manual', 'welcome pack', 'event manual',
+                                              'event information', 'event guideline']):
                 score += 10
-            if any(kw in combined for kw in ['rules and regulation', 'handbook', 'exhibitor guide']):
+            if any(kw in combined for kw in ['rules and regulation', 'handbook', 'exhibitor guide',
+                                              # Dutch
+                                              'algemene voorschriften', 'handleiding',
+                                              # German
+                                              'ausstellerhandbuch', 'allgemeine vorschriften',
+                                              # French
+                                              'manuel exposant', 'guide exposant',
+                                              ]):
                 score += 5
             # Penalty for very specific/niche pages
             if any(kw in combined for kw in ['vehicle access', 'parking', 'catering', 'restaurant', 'accreditation']):
                 score -= 5
         elif doc_type == 'rules':
-            if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule', 'design regulation']):
+            if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule',
+                                              'design regulation', 'booth construction',
+                                              # Dutch
+                                              'standbouw', 'bouwvoorschriften',
+                                              # German
+                                              'standbauvorschrift', 'technische vorschrift',
+                                              # French
+                                              'reglement technique',
+                                              ]):
                 score += 10
-            if any(kw in combined for kw in ['technical guideline', 'stand design', 'design rule']):
+            if any(kw in combined for kw in ['technical guideline', 'stand design', 'design rule',
+                                              # Dutch
+                                              'technische richtlijn',
+                                              # German
+                                              'technische richtlinie',
+                                              ]):
                 score += 5
+            # Penalty for general/broad documents when more specific exists
+            if any(kw in combined for kw in ['algemene', 'general', 'allgemeine', 'générale']):
+                score -= 3
         elif doc_type == 'schedule':
-            if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule', 'event schedule']):
+            if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule', 'event schedule',
+                                              'opbouw en afbouw', 'aufbau und abbau']):
                 score += 10
-            if any(kw in combined for kw in ['schedule', 'timing', 'move-in']):
+            if any(kw in combined for kw in ['schedule', 'timing', 'move-in', 'deadline',
+                                              'opbouw', 'afbouw', 'aufbau', 'abbau']):
                 score += 5
         elif doc_type == 'floorplan':
-            if any(kw in combined for kw in ['floorplan', 'floor plan', 'expocad', 'hall plan']):
+            if any(kw in combined for kw in ['floorplan', 'floor plan', 'expocad', 'hall plan',
+                                              'expofp', 'mapyourshow',
+                                              'hallenplan', 'plattegrond', 'planimetria']):
                 score += 10
 
         return score
@@ -654,7 +682,7 @@ class DocumentClassifier:
 
         if any(kw in combined for kw in [
             'floor plan', 'floorplan', 'hall plan', 'venue map', 'expo floorplan',
-            'expocad', 'mapyourshow', 'map-dynamics',
+            'expocad', 'expofp', 'mapyourshow', 'map-dynamics',
             'hallenplan', 'plattegrond', 'planimetria',
         ]):
             return 'floorplan'
