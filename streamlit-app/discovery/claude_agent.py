@@ -355,6 +355,12 @@ class ClaudeAgent:
             'agent_iterations': 0,
             'warnings': [],
             'errors': [],
+            # Site context for troubleshooting
+            'key_pages_found': [],  # Important pages discovered on main site
+            'pdf_types': {},  # type -> count (from prescan)
+            'pdf_years': {},  # year -> count (from prescan)
+            'has_login_portal': False,
+            'site_features': [],  # Notable features: 'salesforce_oem', 'expocad', etc.
         }
 
     def _log(self, message: str) -> None:
@@ -1959,8 +1965,32 @@ class ClaudeAgent:
         s.append(f"URL: {domain} | {input_data.city or '?'} | {elapsed}s")
         s.append("")
 
-        # Pre-scan
+        # Site context
         sd = self._sd
+        features = sd.get('site_features', [])
+        key_pages = sd.get('key_pages_found', [])
+        site_parts = []
+        if features:
+            site_parts.append('platforms: ' + ', '.join(features))
+        if sd.get('has_login_portal'):
+            site_parts.append('login portal')
+        if key_pages:
+            site_parts.append('key pages: ' + ', '.join(key_pages[:6]))
+        if site_parts:
+            s.append(f"SITE: {' | '.join(site_parts)}")
+        # PDF breakdown
+        if sd.get('pdf_types'):
+            type_parts = [f"{v}x {k}" for k, v in sorted(sd['pdf_types'].items(), key=lambda x: -x[1])]
+            year_parts = [f"{v}x {k}" for k, v in sorted(sd['pdf_years'].items(), key=lambda x: -x[1]) if k != 'geen']
+            no_year = sd['pdf_years'].get('geen', 0)
+            yr_str = ', '.join(year_parts)
+            if no_year:
+                yr_str += f", {no_year}x geen jaar" if yr_str else f"{no_year}x geen jaar"
+            s.append(f"PDFs: {' | '.join(type_parts)}")
+            s.append(f"  jaren: {yr_str}")
+        s.append("")
+
+        # Pre-scan
         s.append(f"PRE-SCAN: {sd['prescan_pdfs']} PDFs, {sd['prescan_pages']} pages, {sd['prescan_emails']} emails")
         if sd['subdomains_checked']:
             found_str = ', '.join(sd['subdomains_found']) if sd['subdomains_found'] else 'geen'
@@ -2115,6 +2145,37 @@ class ClaudeAgent:
             # Log all exhibitor pages
             for page in pre_scan_results.get('exhibitor_pages', []):
                 self._log(f"  Exhibitor pagina: {page[:80]}")
+
+            # Collect site-context for compact summary
+            for pdf in pre_scan_results.get('pdf_links', []):
+                ptype = pdf.get('type', 'unknown')
+                self._sd['pdf_types'][ptype] = self._sd['pdf_types'].get(ptype, 0) + 1
+                pyear = pdf.get('year') or 'geen'
+                self._sd['pdf_years'][pyear] = self._sd['pdf_years'].get(pyear, 0) + 1
+            # Detect key pages and site features from exhibitor pages
+            base_domain = urlparse(input_data.known_url).netloc if input_data.known_url else ''
+            for page in pre_scan_results.get('exhibitor_pages', []):
+                page_lower = page.lower()
+                page_host = urlparse(page).netloc
+                # Track important pages on the main site
+                if page_host == base_domain or page_host == 'www.' + base_domain:
+                    path = urlparse(page).path
+                    if any(kw in page_lower for kw in ['exhibitor', 'resource', 'download', 'document', 'participate']):
+                        label = path.strip('/').split('/')[-1] if path.strip('/') else path
+                        if label and label not in [p for p in self._sd['key_pages_found']]:
+                            self._sd['key_pages_found'].append(label)
+                # Detect site features
+                if 'my.site.com' in page_host and 'oem' in page_lower:
+                    if 'salesforce_oem' not in self._sd['site_features']:
+                        self._sd['site_features'].append('salesforce_oem')
+                if 'expocad.com' in page_host:
+                    if 'expocad' not in self._sd['site_features']:
+                        self._sd['site_features'].append('expocad')
+                if 'expofp.' in page_host:
+                    if 'expofp' not in self._sd['site_features']:
+                        self._sd['site_features'].append('expofp')
+                if any(kw in page_lower for kw in ['login', 'signin', 'mymwc']):
+                    self._sd['has_login_portal'] = True
 
             # PHASE 1.25: Deep scan external portals (Salesforce, OEM, etc.)
             # These portals have web page content (not PDFs) with rules, schedules, etc.
