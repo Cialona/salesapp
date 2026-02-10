@@ -49,32 +49,47 @@ with st.sidebar:
 
     # Admin: logo upload (pin-protected)
     st.markdown("---")
-    with st.expander("⚙️ Instellingen"):
-        if 'admin_unlocked' not in st.session_state:
+    st.markdown(f"""
+    <p style="color: rgba(255,255,255,0.5); font-size: 0.75rem; text-align: center; margin: 0;">
+        Instellingen
+    </p>
+    """, unsafe_allow_html=True)
+
+    if 'admin_unlocked' not in st.session_state:
+        st.session_state.admin_unlocked = False
+
+    if not st.session_state.admin_unlocked:
+        pin = st.text_input("PIN", type="password", key="admin_pin",
+                            label_visibility="collapsed", placeholder="Admin PIN...")
+        if pin and pin == ADMIN_PIN:
+            st.session_state.admin_unlocked = True
+            st.rerun()
+        elif pin:
+            st.error("Onjuiste PIN")
+    else:
+        st.markdown(f"""
+        <div style="background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4);
+                    border-radius: 8px; padding: 0.5rem; text-align: center; margin-bottom: 0.75rem;">
+            <span style="color: #10B981; font-size: 0.85rem;">Admin modus actief</span>
+        </div>
+        """, unsafe_allow_html=True)
+        uploaded_logo = st.file_uploader(
+            "Upload logo (PNG)", type=["png"], key="logo_upload"
+        )
+        if uploaded_logo is not None:
+            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+            LOGO_PATH.write_bytes(uploaded_logo.getvalue())
+            st.success("Logo opgeslagen!")
+            st.rerun()
+
+        if LOGO_PATH.exists():
+            if st.button("Verwijder logo", use_container_width=True):
+                LOGO_PATH.unlink()
+                st.rerun()
+
+        if st.button("Vergrendel", use_container_width=True):
             st.session_state.admin_unlocked = False
-
-        if not st.session_state.admin_unlocked:
-            pin = st.text_input("Admin PIN", type="password", key="admin_pin")
-            if pin and pin == ADMIN_PIN:
-                st.session_state.admin_unlocked = True
-                st.rerun()
-            elif pin:
-                st.error("Onjuiste PIN")
-        else:
-            st.success("Admin modus actief")
-            uploaded_logo = st.file_uploader(
-                "Upload logo (PNG)", type=["png"], key="logo_upload"
-            )
-            if uploaded_logo is not None:
-                ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-                LOGO_PATH.write_bytes(uploaded_logo.getvalue())
-                st.success("Logo opgeslagen!")
-                st.rerun()
-
-            if LOGO_PATH.exists():
-                if st.button("🗑️ Verwijder logo", use_container_width=True):
-                    LOGO_PATH.unlink()
-                    st.rerun()
+            st.rerun()
 
 # ── Main Content ─────────────────────────────────────────────────────────
 

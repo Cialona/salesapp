@@ -8,6 +8,7 @@ import json
 import asyncio
 import subprocess
 import sys
+import time as _time
 from pathlib import Path
 from datetime import datetime
 import os
@@ -213,8 +214,6 @@ st.info("""
 2. Klik op 'Start Discovery'
 3. De AI zoekt eerst de officiële website
 4. Daarna worden automatisch documenten gezocht (~2-3 minuten)
-
-**Geschatte kosten:** ~€1.80 per beurs
 """)
 
 # Check for API key
@@ -243,28 +242,121 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
     if not fair_name:
         st.error("Vul een beursnaam in")
     else:
-        # Show progress
+        from discovery.claude_agent import ClaudeAgent
+
+        # ── Phase tracking state ─────────────────────────────────────
+        PHASES = ClaudeAgent.PHASES
+        phase_state = {
+            "current_id": "url_lookup",
+            "start_time": _time.time(),
+            "phase_start_time": _time.time(),
+            "phase_times": {},  # actual seconds per completed phase
+        }
+
+        def _get_phase(phase_id):
+            for p in PHASES:
+                if p["id"] == phase_id:
+                    return p
+            return PHASES[0]
+
+        def _phase_index(phase_id):
+            for i, p in enumerate(PHASES):
+                if p["id"] == phase_id:
+                    return i
+            return 0
+
+        def _remaining_estimate():
+            """Estimate remaining seconds based on actual + estimated durations."""
+            cur_idx = _phase_index(phase_state["current_id"])
+            cur_phase = _get_phase(phase_state["current_id"])
+            # Time spent in current phase so far
+            in_phase = _time.time() - phase_state["phase_start_time"]
+            # Remaining of current phase (estimate minus elapsed, min 0)
+            cur_remaining = max(0, cur_phase["est_secs"] - in_phase)
+            # Sum estimated durations of future phases
+            future = sum(p["est_secs"] for p in PHASES[cur_idx + 1:])
+            return int(cur_remaining + future)
+
+        def _progress_pct():
+            """Calculate current progress % including interpolation within phase."""
+            cur_phase = _get_phase(phase_state["current_id"])
+            in_phase = _time.time() - phase_state["phase_start_time"]
+            ratio = min(1.0, in_phase / max(1, cur_phase["est_secs"]))
+            pct = cur_phase["pct_start"] + ratio * (cur_phase["pct_end"] - cur_phase["pct_start"])
+            return min(int(pct), 99)
+
+        # ── UI elements ──────────────────────────────────────────────
         progress_container = st.container()
-
         with progress_container:
-            st.markdown("### 🔄 Discovery bezig...")
+            st.markdown("### Discovery bezig...")
             progress_bar = st.progress(0)
+            phase_cols = st.columns(len(PHASES))
+            phase_labels = []
+            for i, (col, phase) in enumerate(zip(phase_cols, PHASES)):
+                with col:
+                    lbl = st.empty()
+                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:#9CA3AF;
+                        padding:0.25rem 0;">{phase['label']}</div>""", unsafe_allow_html=True)
+                    phase_labels.append(lbl)
+            time_display = st.empty()
             status_text = st.empty()
-            log_expander = st.expander("📋 Voortgang details", expanded=True)
-
+            log_expander = st.expander("Voortgang details", expanded=False)
             with log_expander:
                 log_container = st.empty()
                 logs = []
 
+        def _render_phase_labels():
+            cur_idx = _phase_index(phase_state["current_id"])
+            for i, (lbl, phase) in enumerate(zip(phase_labels, PHASES)):
+                if i < cur_idx:
+                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:#10B981;
+                        font-weight:600;padding:0.25rem 0;">✓ {phase['label']}</div>""",
+                        unsafe_allow_html=True)
+                elif i == cur_idx:
+                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:{CIALONA_ORANGE};
+                        font-weight:600;padding:0.25rem 0;">● {phase['label']}</div>""",
+                        unsafe_allow_html=True)
+                else:
+                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:#9CA3AF;
+                        padding:0.25rem 0;">{phase['label']}</div>""",
+                        unsafe_allow_html=True)
+
+        def _update_time():
+            remaining = _remaining_estimate()
+            mins, secs = divmod(remaining, 60)
+            elapsed = int(_time.time() - phase_state["start_time"])
+            e_mins, e_secs = divmod(elapsed, 60)
+            time_display.markdown(f"""<div style="text-align:center;color:#6B7280;font-size:0.9rem;
+                margin:0.5rem 0;">Geschatte resterende tijd: <strong>{mins}:{secs:02d}</strong>
+                &nbsp;·&nbsp; Verstreken: {e_mins}:{e_secs:02d}</div>""",
+                unsafe_allow_html=True)
+
+        def on_phase_change(new_phase_id):
+            """Called by ClaudeAgent when a phase transitions."""
+            old_id = phase_state["current_id"]
+            now = _time.time()
+            phase_state["phase_times"][old_id] = now - phase_state["phase_start_time"]
+            phase_state["current_id"] = new_phase_id
+            phase_state["phase_start_time"] = now
+            progress_bar.progress(_progress_pct())
+            _render_phase_labels()
+            _update_time()
+
         def update_logs(msg):
-            """Update the log display."""
+            """Update the log display and refresh progress."""
             logs.append(msg)
-            log_container.code("\n".join(logs[-25:]))  # Show last 25 lines
+            log_container.code("\n".join(logs[-25:]))
+            # Update progress interpolation on every log tick
+            progress_bar.progress(_progress_pct())
+            _update_time()
+
+        # ── Initial render ───────────────────────────────────────────
+        _render_phase_labels()
+        _update_time()
 
         # Step 1: Find the official website URL
-        update_logs(f"🔍 Zoeken naar officiële website voor: {fair_name} {fair_year}")
+        update_logs(f"Zoeken naar officiële website voor: {fair_name} {fair_year}")
         status_text.text("Officiële website zoeken...")
-        progress_bar.progress(5)
 
         fair_url = None
         max_url_attempts = 3
@@ -277,26 +369,23 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             notes = website_result.get("notes", "")
 
             if candidate_url:
-                update_logs(f"🔗 URL gevonden: {candidate_url}")
+                update_logs(f"URL gevonden: {candidate_url}")
                 update_logs(f"   Zekerheid: {confidence} - {notes}")
 
-                # Validate the URL
                 status_text.text("URL valideren...")
                 if validate_url(candidate_url):
-                    update_logs(f"✅ URL gevalideerd!")
+                    update_logs(f"URL gevalideerd!")
                     fair_url = candidate_url
                     break
                 else:
-                    update_logs(f"⚠️ URL ongeldig (domein bestaat niet), opnieuw zoeken...")
+                    update_logs(f"URL ongeldig (domein bestaat niet), opnieuw zoeken...")
                     failed_url = candidate_url
             else:
-                update_logs(f"⚠️ Geen URL gevonden: {notes}")
+                update_logs(f"Geen URL gevonden: {notes}")
                 break
 
         if not fair_url:
-            update_logs(f"⚠️ Geen geldige website gevonden, agent zal zelf zoeken...")
-
-        progress_bar.progress(10)
+            update_logs(f"Geen geldige website gevonden, agent zal zelf zoeken...")
 
         # Step 2: Check Playwright
         status_text.text("Browser controleren...")
@@ -304,17 +393,14 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             st.error("Browser kon niet worden gestart. Probeer het later opnieuw.")
             st.stop()
 
-        progress_bar.progress(15)
-
         async def run_discovery_async():
             """Run the discovery asynchronously."""
-            from discovery.claude_agent import ClaudeAgent
             from discovery.schemas import TestCaseInput, output_to_dict
 
             if fair_url:
-                update_logs(f"🌐 Start URL: {fair_url}")
+                update_logs(f"Start URL: {fair_url}")
             else:
-                update_logs(f"🔍 Agent zal zelf zoeken naar de website")
+                update_logs(f"Agent zal zelf zoeken naar de website")
 
             status_text.text("AI agent wordt gestart...")
 
@@ -330,34 +416,33 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
                 api_key=api_key,
                 max_iterations=40,
                 debug=True,
-                on_status=update_logs
+                on_status=update_logs,
+                on_phase=on_phase_change
             )
 
-            progress_bar.progress(20)
-            status_text.text("Navigeren door website...")
+            status_text.text("Website scannen...")
 
             output = await agent.run(input_data)
             return output_to_dict(output)
 
         try:
-            # Run the async discovery
             result = asyncio.run(run_discovery_async())
 
-            progress_bar.progress(90)
-            status_text.text("Resultaten verwerken...")
+            progress_bar.progress(100)
+            phase_state["current_id"] = "results"
+            _render_phase_labels()
+            elapsed = int(_time.time() - phase_state["start_time"])
+            e_mins, e_secs = divmod(elapsed, 60)
+            time_display.markdown(f"""<div style="text-align:center;color:#10B981;font-size:0.9rem;
+                margin:0.5rem 0;font-weight:600;">Voltooid in {e_mins}:{e_secs:02d}</div>""",
+                unsafe_allow_html=True)
+            status_text.text("Discovery voltooid!")
 
-            # Add year to result
             result['year'] = fair_year
-
-            # Import the result into data manager
             fair_id = dm.import_discovery_result(result)
 
-            progress_bar.progress(100)
-            status_text.text("✅ Discovery voltooid!")
+            update_logs("Discovery succesvol afgerond!")
 
-            update_logs("✅ Discovery succesvol afgerond!")
-
-            # Show results summary
             fair = dm.get_fair(fair_id)
             if fair:
                 completeness = fair.get('completeness', {})
@@ -369,20 +454,20 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("📄 Bekijk Details", use_container_width=True):
+                    if st.button("Bekijk Details", use_container_width=True):
                         st.session_state['selected_fair'] = fair_id
                         st.switch_page("pages/2_Fair_Details.py")
                 with col2:
-                    if st.button("🏠 Naar Dashboard", use_container_width=True):
+                    if st.button("Naar Dashboard", use_container_width=True):
                         st.switch_page("app.py")
 
         except Exception as e:
             error_msg = str(e)
-            update_logs(f"❌ Fout: {error_msg}")
+            update_logs(f"Fout: {error_msg}")
             st.error(f"Er ging iets mis: {error_msg}")
 
             import traceback
-            with st.expander("🔧 Technische details"):
+            with st.expander("Technische details"):
                 st.code(traceback.format_exc())
 
 st.markdown("---")
