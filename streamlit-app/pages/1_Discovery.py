@@ -441,6 +441,9 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             result['year'] = fair_year
             fair_id = dm.import_discovery_result(result)
 
+            # Save to session state so buttons work after rerun
+            st.session_state['last_discovery_fair_id'] = fair_id
+
             update_logs("Discovery succesvol afgerond!")
 
             fair = dm.get_fair(fair_id)
@@ -452,15 +455,6 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
                 Documenten gevonden: **{completeness.get('found', 0)}/{completeness.get('total', 5)}**
                 """)
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("Bekijk Details", use_container_width=True):
-                        st.session_state['selected_fair'] = fair_id
-                        st.switch_page("pages/2_Fair_Details.py")
-                with col2:
-                    if st.button("Naar Dashboard", use_container_width=True):
-                        st.switch_page("app.py")
-
         except Exception as e:
             error_msg = str(e)
             update_logs(f"Fout: {error_msg}")
@@ -469,6 +463,18 @@ if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use
             import traceback
             with st.expander("Technische details"):
                 st.code(traceback.format_exc())
+
+# Navigation buttons — outside the discovery button block so they persist after rerun
+if 'last_discovery_fair_id' in st.session_state:
+    _nav_fair_id = st.session_state['last_discovery_fair_id']
+    col_nav1, col_nav2 = st.columns(2)
+    with col_nav1:
+        if st.button("Bekijk Details", use_container_width=True, key="nav_details"):
+            st.session_state['selected_fair'] = _nav_fair_id
+            st.switch_page("pages/2_Fair_Details.py")
+    with col_nav2:
+        if st.button("Naar Dashboard", use_container_width=True, key="nav_dashboard"):
+            st.switch_page("app.py")
 
 st.markdown("---")
 
