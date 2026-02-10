@@ -30,12 +30,16 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
-    st.markdown(f"""
-    <div style="text-align: center; padding: 1rem;">
-        <h2 style="color: {CIALONA_ORANGE}; margin: 0;">CIALONA</h2>
-        <p style="color: white; font-size: 0.8rem; margin: 0;">Eye for Attention</p>
-    </div>
-    """, unsafe_allow_html=True)
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=200)
+    else:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 1rem;">
+            <h2 style="color: {CIALONA_ORANGE}; margin: 0;">CIALONA</h2>
+            <p style="color: white; font-size: 0.8rem; margin: 0;">Eye for Attention</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
 
