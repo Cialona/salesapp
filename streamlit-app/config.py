@@ -21,6 +21,7 @@ APP_TITLE = "Trade Fair Discovery"
 APP_ICON = "🎪"
 COMPANY_NAME = "Cialona"
 TAGLINE = "Eye for Attention"
+ADMIN_PIN = "cialona2026"
 
 # Document Types
 DOCUMENT_TYPES = {
@@ -188,7 +189,7 @@ CUSTOM_CSS = f"""
         margin-top: 0.5rem;
     }}
 
-    /* Button Styles */
+    /* Button Styles — main content area */
     .stButton > button {{
         background: linear-gradient(135deg, {CIALONA_ORANGE} 0%, #E8850F 100%);
         color: white;
@@ -202,6 +203,21 @@ CUSTOM_CSS = f"""
     .stButton > button:hover {{
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(247, 147, 30, 0.4);
+    }}
+
+    /* Sidebar buttons — consistent orange style */
+    [data-testid="stSidebar"] .stButton > button {{
+        background: linear-gradient(135deg, {CIALONA_ORANGE} 0%, #E8850F 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 500;
+    }}
+
+    [data-testid="stSidebar"] .stButton > button:hover {{
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(247, 147, 30, 0.4);
+        background: linear-gradient(135deg, #E8850F 0%, {CIALONA_ORANGE} 100%);
     }}
 
     /* Secondary Button */
@@ -321,9 +337,10 @@ CUSTOM_CSS = f"""
         padding: 0.75rem 1rem;
     }}
 
-    /* Hide Streamlit branding */
+    /* Hide Streamlit branding and auto-nav */
     #MainMenu {{visibility: hidden;}}
     footer {{visibility: hidden;}}
+    [data-testid="stSidebarNav"] {{display: none;}}
 
     /* Custom scrollbar */
     ::-webkit-scrollbar {{
