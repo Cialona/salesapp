@@ -141,6 +141,46 @@ class BrowserController:
         except Exception:
             return ""
 
+    async def extract_external_portal_urls(self) -> List[Dict[str, str]]:
+        """
+        Extract external portal URLs from the page HTML source.
+        Searches the raw HTML for URLs pointing to known portal platforms
+        (Salesforce, Cvent, etc.) that may be hidden in JavaScript, data attributes,
+        or dynamically rendered content.
+        """
+        if not self._page:
+            return []
+
+        try:
+            # Get the full HTML source
+            html = await self._page.content()
+
+            import re
+            portal_patterns = [
+                r'(https?://[a-zA-Z0-9.-]+\.my\.site\.com[^\s"\'<>]*)',  # Salesforce community
+                r'(https?://[a-zA-Z0-9.-]+\.force\.com[^\s"\'<>]*)',     # Salesforce
+                r'(https?://[a-zA-Z0-9.-]+\.salesforce\.com[^\s"\'<>]*)', # Salesforce
+                r'(https?://[a-zA-Z0-9.-]+\.cvent\.com[^\s"\'<>]*)',     # Cvent
+                r'(https?://[a-zA-Z0-9.-]+\.a2zinc\.net[^\s"\'<>]*)',    # A2Z
+                r'(https?://[a-zA-Z0-9.-]+\.expocad\.[a-z]+[^\s"\'<>]*)',# ExpoCad
+                r'(https?://[a-zA-Z0-9.-]+\.smallworldlabs\.com[^\s"\'<>]*)', # SWL
+            ]
+
+            found = []
+            seen = set()
+            for pattern in portal_patterns:
+                matches = re.findall(pattern, html)
+                for url in matches:
+                    # Clean up the URL
+                    url = url.rstrip('\\').rstrip(')').rstrip(';')
+                    if url not in seen:
+                        seen.add(url)
+                        found.append({'url': url, 'source': 'html_source'})
+
+            return found
+        except Exception:
+            return []
+
     # Computer Use Actions
 
     async def click(self, x: int, y: int) -> None:
@@ -279,21 +319,92 @@ class BrowserController:
         return {'width': self.width, 'height': self.height}
 
     async def extract_links(self) -> List[LinkInfo]:
-        """Extract all links from the current page."""
+        """Extract all links from the current page, including buttons and interactive elements."""
         if not self._page:
             raise RuntimeError("Browser not launched")
 
         # First, expand all accordions/details/dropdowns to reveal hidden content
         await self._expand_all_hidden_sections()
 
-        # Extract links using JavaScript
-        links = await self._page.eval_on_selector_all(
-            'a[href]',
-            '''(anchors) => anchors.map(a => ({
-                href: a.getAttribute('href') || '',
-                text: (a.textContent || '').trim()
-            })).filter(link => link.href.length > 0)'''
-        )
+        # Extract links from <a> tags AND from buttons/interactive elements
+        links = await self._page.evaluate('''() => {
+            const results = [];
+            const seen = new Set();
+
+            // 1. Standard <a href> links
+            document.querySelectorAll('a[href]').forEach(a => {
+                const href = a.getAttribute('href') || '';
+                const text = (a.textContent || '').trim();
+                if (href.length > 0 && !seen.has(href)) {
+                    seen.add(href);
+                    results.push({href, text, source: 'a'});
+                }
+            });
+
+            // 2. Buttons and clickable elements with data-href, data-url, data-link
+            const dataAttrs = ['data-href', 'data-url', 'data-link', 'data-target-url', 'data-redirect'];
+            document.querySelectorAll('button, [role="button"], [class*="btn"], [class*="button"]').forEach(el => {
+                for (const attr of dataAttrs) {
+                    const val = el.getAttribute(attr);
+                    if (val && val.startsWith('http') && !seen.has(val)) {
+                        seen.add(val);
+                        results.push({href: val, text: (el.textContent || '').trim(), source: 'data-attr'});
+                    }
+                }
+            });
+
+            // 3. Elements with onclick containing URLs (window.open, window.location, etc.)
+            document.querySelectorAll('[onclick]').forEach(el => {
+                const onclick = el.getAttribute('onclick') || '';
+                // Extract URLs from onclick handlers
+                const urlPatterns = [
+                    /window\.open\s*\(\s*['"]([^'"]+)['"]/,
+                    /window\.location\s*=\s*['"]([^'"]+)['"]/,
+                    /window\.location\.href\s*=\s*['"]([^'"]+)['"]/,
+                    /location\.href\s*=\s*['"]([^'"]+)['"]/,
+                    /https?:\/\/[^\s'"]+/
+                ];
+                for (const pattern of urlPatterns) {
+                    const match = onclick.match(pattern);
+                    if (match) {
+                        const url = match[1] || match[0];
+                        if (!seen.has(url)) {
+                            seen.add(url);
+                            results.push({href: url, text: (el.textContent || '').trim(), source: 'onclick'});
+                        }
+                    }
+                }
+            });
+
+            // 4. Links in iframes (if same-origin)
+            try {
+                document.querySelectorAll('iframe').forEach(iframe => {
+                    try {
+                        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                        if (iframeDoc) {
+                            iframeDoc.querySelectorAll('a[href]').forEach(a => {
+                                const href = a.getAttribute('href') || '';
+                                if (href.startsWith('http') && !seen.has(href)) {
+                                    seen.add(href);
+                                    results.push({href, text: (a.textContent || '').trim(), source: 'iframe'});
+                                }
+                            });
+                        }
+                    } catch(e) {} // Cross-origin iframe - skip
+                });
+            } catch(e) {}
+
+            // 5. Any element with href attribute (not just <a>)
+            document.querySelectorAll('[href]:not(a):not(link):not(base)').forEach(el => {
+                const href = el.getAttribute('href') || '';
+                if (href.startsWith('http') && !seen.has(href)) {
+                    seen.add(href);
+                    results.push({href, text: (el.textContent || '').trim(), source: 'other-href'});
+                }
+            });
+
+            return results;
+        }''')
 
         base_url = self._page.url
         parsed_base = urlparse(base_url)
