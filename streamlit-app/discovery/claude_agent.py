@@ -1209,6 +1209,13 @@ class ClaudeAgent:
                         score += 10  # Strong: fair name in hostname
                     if term in path:
                         score += 5   # Good: fair name in path
+                # OEM portals (e.g., mwcoem, provadaoem) typically contain the richest
+                # content: rules, schedules, manuals. Prioritize them.
+                if 'oem' in path:
+                    score += 8
+                # Salesforce community portals with /s/ paths are interactive portals
+                if '/s/' in path and 'my.site.com' in host:
+                    score += 3
                 return score
 
             portal_urls.sort(key=_relevance_score, reverse=True)
@@ -1254,7 +1261,7 @@ class ClaudeAgent:
         try:
             await scan_browser.launch()
 
-            for portal_url in portal_urls[:3]:  # Max 3 portals
+            for portal_url in portal_urls[:5]:  # Max 5 portals (OEM portals need priority)
                 try:
                     self._log(f"  🌐 Scanning portal: {portal_url}")
                     await scan_browser.goto(portal_url)
