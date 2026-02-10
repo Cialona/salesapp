@@ -1642,12 +1642,21 @@ class ClaudeAgent:
         start_time = time.time()
 
         try:
+            # Validate: known_url is required for discovery
+            if not input_data.known_url:
+                self._log("❌ Geen website URL opgegeven voor deze beurs.")
+                self._log("   Discovery kan niet worden uitgevoerd zonder een bekende website URL.")
+                self._log("   Voeg een website URL toe aan de beurs en probeer opnieuw.")
+                output.debug.notes.append("Geen known_url opgegeven - discovery afgebroken")
+                output.debug.discovery_log = list(self._discovery_log)
+                return output
+
             # PHASE 1: Pre-scan website for documents (HTML-based, fast)
             self.on_phase("prescan")
             self._log("=" * 60)
             self._log("FASE 1: PRE-SCAN WEBSITE")
             self._log("=" * 60)
-            start_url = input_data.known_url or f"https://www.google.com/search?q={input_data.fair_name}+official+website"
+            start_url = input_data.known_url
             self._log(f"Start URL: {start_url}")
             self._log(f"Beurs: {input_data.fair_name} | Stad: {input_data.city} | Land: {input_data.country}")
 
@@ -1656,179 +1665,178 @@ class ClaudeAgent:
             classification_result = None
             skip_browser_agent = False
 
-            if input_data.known_url:
-                pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
-                self._log(f"Pre-scan resultaat: {len(pre_scan_results.get('pdf_links', []))} PDFs, "
-                         f"{len(pre_scan_results.get('exhibitor_pages', []))} exhibitor pagina's, "
-                         f"{len(pre_scan_results.get('emails', []))} emails")
-                # Log all found PDFs
-                for pdf in pre_scan_results.get('pdf_links', []):
-                    self._log(f"  PDF [{pdf.get('type', '?')}] [{pdf.get('year', '?')}]: {pdf.get('url', '?')[:80]}")
-                # Log all exhibitor pages
-                for page in pre_scan_results.get('exhibitor_pages', []):
-                    self._log(f"  Exhibitor pagina: {page[:80]}")
+            pre_scan_results = await self._pre_scan_website(input_data.known_url, input_data.fair_name)
+            self._log(f"Pre-scan resultaat: {len(pre_scan_results.get('pdf_links', []))} PDFs, "
+                     f"{len(pre_scan_results.get('exhibitor_pages', []))} exhibitor pagina's, "
+                     f"{len(pre_scan_results.get('emails', []))} emails")
+            # Log all found PDFs
+            for pdf in pre_scan_results.get('pdf_links', []):
+                self._log(f"  PDF [{pdf.get('type', '?')}] [{pdf.get('year', '?')}]: {pdf.get('url', '?')[:80]}")
+            # Log all exhibitor pages
+            for page in pre_scan_results.get('exhibitor_pages', []):
+                self._log(f"  Exhibitor pagina: {page[:80]}")
 
-                # PHASE 1.25: Deep scan external portals (Salesforce, OEM, etc.)
-                # These portals have web page content (not PDFs) with rules, schedules, etc.
-                self._log("")
-                self._log("=" * 60)
-                self.on_phase("portal_scan")
-                self._log("FASE 1.25: PORTAL DETECTIE & DEEP SCAN")
-                self._log("=" * 60)
-                portal_pages = []
-                portal_urls = self._find_portal_urls(pre_scan_results, fair_name=input_data.fair_name)
-                self._log(f"Gevonden portal URLs: {len(portal_urls)}")
-                for purl in portal_urls:
-                    self._log(f"  Portal: {purl}")
-                if portal_urls:
-                    portal_pages = await self._deep_scan_portals(portal_urls, input_data.fair_name)
-                    self._log(f"Portal deep scan resultaat: {len(portal_pages)} pagina's gevonden")
-                    for pp in portal_pages:
-                        content_len = len(pp.get('text_content', '') or '')
-                        self._log(f"  [{pp.get('detected_type', '?')}] {pp.get('url', '?')[:70]} ({content_len} chars)")
+            # PHASE 1.25: Deep scan external portals (Salesforce, OEM, etc.)
+            # These portals have web page content (not PDFs) with rules, schedules, etc.
+            self._log("")
+            self._log("=" * 60)
+            self.on_phase("portal_scan")
+            self._log("FASE 1.25: PORTAL DETECTIE & DEEP SCAN")
+            self._log("=" * 60)
+            portal_pages = []
+            portal_urls = self._find_portal_urls(pre_scan_results, fair_name=input_data.fair_name)
+            self._log(f"Gevonden portal URLs: {len(portal_urls)}")
+            for purl in portal_urls:
+                self._log(f"  Portal: {purl}")
+            if portal_urls:
+                portal_pages = await self._deep_scan_portals(portal_urls, input_data.fair_name)
+                self._log(f"Portal deep scan resultaat: {len(portal_pages)} pagina's gevonden")
+                for pp in portal_pages:
+                    content_len = len(pp.get('text_content', '') or '')
+                    self._log(f"  [{pp.get('detected_type', '?')}] {pp.get('url', '?')[:70]} ({content_len} chars)")
 
-                    # Add any PDFs found on portal pages to our PDF list
-                    for page in portal_pages:
-                        if page.get('is_pdf'):
-                            pre_scan_results['pdf_links'].append({
-                                'url': page['url'],
-                                'text': page.get('page_title', ''),
-                                'type': page.get('detected_type', 'unknown'),
-                                'year': None,
-                                'source_page': 'portal'
-                            })
-                else:
-                    self._log("⚠️ Geen portal URLs gevonden in pre-scan resultaten")
+                # Add any PDFs found on portal pages to our PDF list
+                for page in portal_pages:
+                    if page.get('is_pdf'):
+                        pre_scan_results['pdf_links'].append({
+                            'url': page['url'],
+                            'text': page.get('page_title', ''),
+                            'type': page.get('detected_type', 'unknown'),
+                            'year': None,
+                            'source_page': 'portal'
+                        })
+            else:
+                self._log("⚠️ Geen portal URLs gevonden in pre-scan resultaten")
 
-                # PHASE 1.5: Classify found documents with LLM (STRICT validation)
-                self._log("")
-                self._log("=" * 60)
-                self.on_phase("classification")
-                self._log("FASE 1.5: DOCUMENT CLASSIFICATIE (LLM)")
-                self._log("=" * 60)
-                if pre_scan_results['pdf_links'] or portal_pages:
-                    self._log("📋 Starting STRICT document classification with LLM...")
-                    classifier = DocumentClassifier(self.client, self._log)
+            # PHASE 1.5: Classify found documents with LLM (STRICT validation)
+            self._log("")
+            self._log("=" * 60)
+            self.on_phase("classification")
+            self._log("FASE 1.5: DOCUMENT CLASSIFICATIE (LLM)")
+            self._log("=" * 60)
+            if pre_scan_results['pdf_links'] or portal_pages:
+                self._log("📋 Starting STRICT document classification with LLM...")
+                classifier = DocumentClassifier(self.client, self._log)
 
-                    classification_result = await classifier.classify_documents(
-                        pdf_links=pre_scan_results['pdf_links'],
-                        fair_name=input_data.fair_name,
-                        target_year="2026",
-                        exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
-                        portal_pages=[p for p in portal_pages if p.get('text_content')],
-                    )
+                classification_result = await classifier.classify_documents(
+                    pdf_links=pre_scan_results['pdf_links'],
+                    fair_name=input_data.fair_name,
+                    target_year="2026",
+                    exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
+                    portal_pages=[p for p in portal_pages if p.get('text_content')],
+                )
 
-                    # Log classification results
-                    self._log(f"Classificatie resultaat:")
-                    self._log(f"  Gevonden types: {classification_result.found_types}")
-                    self._log(f"  Missende types: {classification_result.missing_types}")
-                    for dtype in ['floorplan', 'exhibitor_manual', 'rules', 'schedule']:
-                        cls = getattr(classification_result, dtype, None)
-                        if cls:
-                            self._log(f"  {dtype}: {cls.confidence} | year={cls.year_verified} | fair={cls.fair_verified} | url={cls.url[:70]}")
-                        else:
-                            self._log(f"  {dtype}: NIET GEVONDEN")
-                    if classification_result.exhibitor_directory:
-                        self._log(f"  exhibitor_directory: {classification_result.exhibitor_directory[:70]}")
-                    if classification_result.extra_urls_to_scan:
-                        self._log(f"  Extra URLs te scannen: {classification_result.extra_urls_to_scan}")
-
-                    # QUALITY GATE: Only skip agent when classifier says it's safe
-                    # This requires 3+ documents with STRONG confidence (year+fair verified)
-                    if classification_result.skip_agent_safe:
-                        self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
-                        self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
-                        skip_browser_agent = True
+                # Log classification results
+                self._log(f"Classificatie resultaat:")
+                self._log(f"  Gevonden types: {classification_result.found_types}")
+                self._log(f"  Missende types: {classification_result.missing_types}")
+                for dtype in ['floorplan', 'exhibitor_manual', 'rules', 'schedule']:
+                    cls = getattr(classification_result, dtype, None)
+                    if cls:
+                        self._log(f"  {dtype}: {cls.confidence} | year={cls.year_verified} | fair={cls.fair_verified} | url={cls.url[:70]}")
                     else:
-                        self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
-                        self._log("   Browser agent draait voor extra validatie.")
+                        self._log(f"  {dtype}: NIET GEVONDEN")
+                if classification_result.exhibitor_directory:
+                    self._log(f"  exhibitor_directory: {classification_result.exhibitor_directory[:70]}")
+                if classification_result.extra_urls_to_scan:
+                    self._log(f"  Extra URLs te scannen: {classification_result.extra_urls_to_scan}")
 
-                    # PHASE 1.75: Secondary prescan for document references found in classified PDFs
-                    self._log("")
-                    self._log("=" * 60)
-                    self._log("FASE 1.75: SECONDARY PRESCAN (document referenties)")
-                    self._log("=" * 60)
-                    if classification_result.extra_urls_to_scan and not skip_browser_agent:
-                        self._log(f"🔄 Secondary prescan: checking {len(classification_result.extra_urls_to_scan)} document references...")
-                        extra_pdfs = await self._scan_document_references(
-                            classification_result.extra_urls_to_scan
+                # QUALITY GATE: Only skip agent when classifier says it's safe
+                # This requires 3+ documents with STRONG confidence (year+fair verified)
+                if classification_result.skip_agent_safe:
+                    self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
+                    self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
+                    skip_browser_agent = True
+                else:
+                    self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
+                    self._log("   Browser agent draait voor extra validatie.")
+
+                # PHASE 1.75: Secondary prescan for document references found in classified PDFs
+                self._log("")
+                self._log("=" * 60)
+                self._log("FASE 1.75: SECONDARY PRESCAN (document referenties)")
+                self._log("=" * 60)
+                if classification_result.extra_urls_to_scan and not skip_browser_agent:
+                    self._log(f"🔄 Secondary prescan: checking {len(classification_result.extra_urls_to_scan)} document references...")
+                    extra_pdfs = await self._scan_document_references(
+                        classification_result.extra_urls_to_scan
+                    )
+                    if extra_pdfs:
+                        # Add to prescan results and re-classify
+                        pre_scan_results['pdf_links'].extend(extra_pdfs)
+                        self._log(f"  Found {len(extra_pdfs)} additional PDFs from document references")
+                        # Re-run classification with new PDFs
+                        classification_result = await classifier.classify_documents(
+                            pdf_links=pre_scan_results['pdf_links'],
+                            fair_name=input_data.fair_name,
+                            target_year="2026",
+                            exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
+                            portal_pages=[p for p in portal_pages if p.get('text_content')],
                         )
-                        if extra_pdfs:
-                            # Add to prescan results and re-classify
-                            pre_scan_results['pdf_links'].extend(extra_pdfs)
-                            self._log(f"  Found {len(extra_pdfs)} additional PDFs from document references")
-                            # Re-run classification with new PDFs
-                            classification_result = await classifier.classify_documents(
-                                pdf_links=pre_scan_results['pdf_links'],
-                                fair_name=input_data.fair_name,
-                                target_year="2026",
-                                exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
-                                portal_pages=[p for p in portal_pages if p.get('text_content')],
-                            )
-                            if classification_result.skip_agent_safe:
-                                self._log(f"🎉 KWALITEITSCHECK NA SECONDARY SCAN GESLAAGD!")
-                                skip_browser_agent = True
+                        if classification_result.skip_agent_safe:
+                            self._log(f"🎉 KWALITEITSCHECK NA SECONDARY SCAN GESLAAGD!")
+                            skip_browser_agent = True
 
-                # Format pre-scan results for the agent
-                if pre_scan_results['pdf_links']:
-                    pre_scan_info += "\n\n🎯 PRE-SCAN RESULTATEN - DOCUMENTEN GEVONDEN VOORAF:\n"
-                    pre_scan_info += "=" * 60 + "\n"
+            # Format pre-scan results for the agent
+            if pre_scan_results['pdf_links']:
+                pre_scan_info += "\n\n🎯 PRE-SCAN RESULTATEN - DOCUMENTEN GEVONDEN VOORAF:\n"
+                pre_scan_info += "=" * 60 + "\n"
 
-                    # Sort PDFs by year (2026 first, then 2025, etc.) and by type
-                    def sort_key(pdf):
-                        year = pdf.get('year', '0000')
-                        if year is None:
-                            year = '0000'
-                        # Sort descending by year (2026 > 2025 > ...)
-                        return (-int(year) if year.isdigit() else 0, pdf['type'])
+                # Sort PDFs by year (2026 first, then 2025, etc.) and by type
+                def sort_key(pdf):
+                    year = pdf.get('year', '0000')
+                    if year is None:
+                        year = '0000'
+                    # Sort descending by year (2026 > 2025 > ...)
+                    return (-int(year) if year.isdigit() else 0, pdf['type'])
 
-                    sorted_pdfs = sorted(pre_scan_results['pdf_links'], key=sort_key)
+                sorted_pdfs = sorted(pre_scan_results['pdf_links'], key=sort_key)
 
-                    # Group by type, but prioritize 2026 documents
-                    by_type = {}
-                    for pdf in sorted_pdfs:
-                        doc_type = pdf['type']
-                        if doc_type not in by_type:
-                            by_type[doc_type] = []
-                        by_type[doc_type].append(pdf)
+                # Group by type, but prioritize 2026 documents
+                by_type = {}
+                for pdf in sorted_pdfs:
+                    doc_type = pdf['type']
+                    if doc_type not in by_type:
+                        by_type[doc_type] = []
+                    by_type[doc_type].append(pdf)
 
-                    type_labels = {
-                        'technical_guidelines': '📋 TECHNISCHE RICHTLIJNEN',
-                        'exhibitor_manual': '📖 EXPOSANTEN HANDLEIDING',
-                        'floorplan': '🗺️ PLATTEGROND',
-                        'schedule': '📅 SCHEMA',
-                        'unknown': '📄 OVERIGE DOCUMENTEN'
-                    }
+                type_labels = {
+                    'technical_guidelines': '📋 TECHNISCHE RICHTLIJNEN',
+                    'exhibitor_manual': '📖 EXPOSANTEN HANDLEIDING',
+                    'floorplan': '🗺️ PLATTEGROND',
+                    'schedule': '📅 SCHEMA',
+                    'unknown': '📄 OVERIGE DOCUMENTEN'
+                }
 
-                    # Show important types first, then unknown
-                    type_order = ['technical_guidelines', 'exhibitor_manual', 'floorplan', 'schedule', 'unknown']
+                # Show important types first, then unknown
+                type_order = ['technical_guidelines', 'exhibitor_manual', 'floorplan', 'schedule', 'unknown']
 
-                    for doc_type in type_order:
-                        if doc_type not in by_type:
-                            continue
-                        pdfs = by_type[doc_type]
-                        pre_scan_info += f"\n{type_labels.get(doc_type, doc_type)}:\n"
-                        for pdf in pdfs[:8]:  # Increased limit per category
-                            year_tag = f" [📅 {pdf.get('year')}]" if pdf.get('year') else ""
-                            # Highlight 2026 documents
-                            if pdf.get('year') == '2026':
-                                pre_scan_info += f"  🌟 {pdf['url']}{year_tag} ← GEBRUIK DIT!\n"
-                            else:
-                                pre_scan_info += f"  ⭐ {pdf['url']}{year_tag}\n"
-
-                    pre_scan_info += "\n" + "=" * 60
-                    pre_scan_info += "\n💡 BELANGRIJK: Gebruik de 2026 documenten (🌟) - dit zijn de meest recente!\n"
-                    pre_scan_info += "💡 GEBRUIK goto_url om documenten direct te openen en valideren!\n"
-
-                if pre_scan_results['exhibitor_pages']:
-                    pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
-                    for page in pre_scan_results['exhibitor_pages'][:10]:
-                        # Highlight exhibitor portals (external subdomains)
-                        if 'exhibitor' in page.lower() and page not in input_data.known_url:
-                            pre_scan_info += f"  🌟 EXHIBITOR PORTAL: {page}\n"
+                for doc_type in type_order:
+                    if doc_type not in by_type:
+                        continue
+                    pdfs = by_type[doc_type]
+                    pre_scan_info += f"\n{type_labels.get(doc_type, doc_type)}:\n"
+                    for pdf in pdfs[:8]:  # Increased limit per category
+                        year_tag = f" [📅 {pdf.get('year')}]" if pdf.get('year') else ""
+                        # Highlight 2026 documents
+                        if pdf.get('year') == '2026':
+                            pre_scan_info += f"  🌟 {pdf['url']}{year_tag} ← GEBRUIK DIT!\n"
                         else:
-                            pre_scan_info += f"  • {page}\n"
-                    pre_scan_info += "\n⚠️ BELANGRIJK: Bezoek EERST de exhibitor portal(s) hierboven - daar staan vaak de beste documenten!"
+                            pre_scan_info += f"  ⭐ {pdf['url']}{year_tag}\n"
+
+                pre_scan_info += "\n" + "=" * 60
+                pre_scan_info += "\n💡 BELANGRIJK: Gebruik de 2026 documenten (🌟) - dit zijn de meest recente!\n"
+                pre_scan_info += "💡 GEBRUIK goto_url om documenten direct te openen en valideren!\n"
+
+            if pre_scan_results['exhibitor_pages']:
+                pre_scan_info += "\n\n📍 GEVONDEN EXHIBITOR PAGINA'S OM TE BEZOEKEN:\n"
+                for page in pre_scan_results['exhibitor_pages'][:10]:
+                    # Highlight exhibitor portals (external subdomains)
+                    if 'exhibitor' in page.lower() and page not in input_data.known_url:
+                        pre_scan_info += f"  🌟 EXHIBITOR PORTAL: {page}\n"
+                    else:
+                        pre_scan_info += f"  • {page}\n"
+                pre_scan_info += "\n⚠️ BELANGRIJK: Bezoek EERST de exhibitor portal(s) hierboven - daar staan vaak de beste documenten!"
 
             # EARLY RETURN: If classification found enough documents, skip browser agent
             if skip_browser_agent and classification_result:
