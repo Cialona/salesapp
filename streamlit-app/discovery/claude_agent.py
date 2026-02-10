@@ -1597,12 +1597,16 @@ class ClaudeAgent:
             'swapcard.com',     # Swapcard
             'grip.events',      # Grip
             'ungerboeck',       # Ungerboeck
+            'dashboards.events',    # Exhibitor dashboards
+            'onlineexhibitormanual.com',  # OEM platform
+            'gevme.com',        # Gevme events
         ]
 
         # Also interested in any PDF that matches fair-related keywords
         fair_pdf_keywords = [
             'exhibitor', 'manual', 'welcome', 'technical', 'regulation',
             'guideline', 'stand-build', 'standbuild', 'floorplan', 'floor-plan',
+            'getting-started', 'rules', 'schedule', 'event-info', 'handbook',
         ]
 
         for query in search_queries[:4]:  # Check 4 searches
@@ -1623,9 +1627,22 @@ class ClaudeAgent:
                     html = response.read().decode('utf-8', errors='ignore')
 
                 # Extract URLs from DuckDuckGo results
-                # DuckDuckGo uses uddg= parameter for actual URLs
-                url_pattern = r'uddg=([^&"]+)'
-                matches = re.findall(url_pattern, html)
+                # DDG returns results in result__a links, but href format varies:
+                # - Direct URLs: href="https://example.com/..."
+                # - Redirect URLs: href="//duckduckgo.com/l/?uddg=https%3A%2F%2F..."
+                raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+                if not raw_hrefs:
+                    # Fallback: scan entire HTML for uddg= parameters
+                    raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+
+                # Resolve each href to its actual URL
+                matches = []
+                for href in raw_hrefs:
+                    uddg_match = re.search(r'uddg=([^&"]+)', href)
+                    if uddg_match:
+                        matches.append(urllib.parse.unquote(uddg_match.group(1)))
+                    elif href.startswith('http'):
+                        matches.append(href)
 
                 for match in matches:
                     try:
