@@ -1406,7 +1406,13 @@ class ClaudeAgent:
                         p.get('detected_type') == 'schedule' and p.get('text_content')
                         for p in portal_pages
                     )
-                    if not schedule_already_found and 'my.site.com' in portal_domain:
+                    # Probe schedule URLs on Salesforce portals AND other known portal types
+                    is_probeable_portal = (
+                        'my.site.com' in portal_domain or
+                        'cvent.com' in portal_domain or
+                        any(ind in portal_domain for ind in ['a2zinc', 'swapcard', 'grip.events'])
+                    )
+                    if not schedule_already_found and is_probeable_portal:
                         # Extract portal base path (e.g., /mwcoem/s from /mwcoem/s/Home)
                         parsed_portal = urlparse(portal_url)
                         path_parts = parsed_portal.path.strip('/').split('/')
@@ -1424,14 +1430,21 @@ class ClaudeAgent:
                                 'build-up-dismantling-schedule',
                                 'build-up-schedule',
                                 'build-up-dismantling',
+                                'build-up-and-dismantling',
+                                'build-up-tear-down',
                                 'schedule',
                                 'deadline',
                                 'deadlines',
+                                'important-dates',
+                                'key-dates',
                                 'access-policy',
                                 'event-schedule',
                                 'timetable',
                                 'set-up-dismantling',
                                 'setup-dismantling',
+                                'move-in-move-out',
+                                'move-in',
+                                'logistics',
                             ]
                             self._log(f"    🔎 Probing {len(schedule_slug_candidates)} schedule URL patterns on portal...")
                             for slug in schedule_slug_candidates:
@@ -1511,6 +1524,8 @@ class ClaudeAgent:
             'event-schedule', 'event schedule', 'build-up-schedule',
             'dismantling-schedule', 'tear-down-schedule', 'move-in-schedule',
             'setup-schedule', '/deadline', 'access-policy', 'timetable',
+            'important-dates', 'important dates', 'key-dates', 'key dates',
+            'move-in-move-out', 'move-in schedule',
             'aufbau-und-abbau', 'opbouw-en-afbouw',
         ]):
             return 'schedule'
@@ -1762,12 +1777,18 @@ class ClaudeAgent:
                     encoded_query = urllib.parse.quote_plus(query)
                     search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
-                    try:
-                        await _search_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
-                        html = await _search_page.content()
-                    except Exception as e:
-                        self._log(f"    Web search error: {e}")
-                        continue
+                    html = None
+                    for attempt in range(2):
+                        try:
+                            await _search_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
+                            html = await _search_page.content()
+                            break
+                        except Exception as e:
+                            if attempt == 0:
+                                self._log(f"    Web search retry after error: {e}")
+                                await asyncio.sleep(2)
+                            else:
+                                self._log(f"    Web search failed after retry: {e}")
 
                     if not html:
                         continue
@@ -3323,21 +3344,20 @@ Kind regards,
             output.official_url = input_data.known_url
             output.official_domain = urlparse(input_data.known_url).netloc
 
-        # Map classified documents to output (ONLY strong confidence counts)
-        if classification.floorplan and classification.floorplan.confidence == 'strong':
-            output.documents.floorplan_url = classification.floorplan.url
-            output.quality.floorplan = "strong"
-            output.primary_reasoning.floorplan = f"PRE-SCAN GEVALIDEERD: {classification.floorplan.reason} (jaar: {classification.floorplan.year_verified}, beurs: {classification.floorplan.fair_verified})"
-
-        if classification.exhibitor_manual and classification.exhibitor_manual.confidence == 'strong':
-            output.documents.exhibitor_manual_url = classification.exhibitor_manual.url
-            output.quality.exhibitor_manual = "strong"
-            output.primary_reasoning.exhibitor_manual = f"PRE-SCAN GEVALIDEERD: {classification.exhibitor_manual.reason} (jaar: {classification.exhibitor_manual.year_verified}, beurs: {classification.exhibitor_manual.fair_verified})"
-
-        if classification.rules and classification.rules.confidence == 'strong':
-            output.documents.rules_url = classification.rules.url
-            output.quality.rules = "strong"
-            output.primary_reasoning.rules = f"PRE-SCAN GEVALIDEERD: {classification.rules.reason} (jaar: {classification.rules.year_verified}, beurs: {classification.rules.fair_verified})"
+        # Map classified documents to output (STRONG and PARTIAL confidence)
+        # PARTIAL documents are still valuable to show to the user — they just
+        # don't count toward the quality gate threshold for skipping the agent.
+        for doc_type, field_name in [
+            ('floorplan', 'floorplan_url'),
+            ('exhibitor_manual', 'exhibitor_manual_url'),
+            ('rules', 'rules_url'),
+        ]:
+            cls = getattr(classification, doc_type, None)
+            if cls and cls.confidence in ['strong', 'partial']:
+                setattr(output.documents, field_name, cls.url)
+                setattr(output.quality, doc_type, cls.confidence)
+                setattr(output.primary_reasoning, doc_type,
+                        f"PRE-SCAN GEVALIDEERD: {cls.reason} (jaar: {cls.year_verified}, beurs: {cls.fair_verified})")
 
         if classification.schedule and classification.schedule.confidence in ['strong', 'partial']:
             output.documents.schedule_page_url = classification.schedule.url
