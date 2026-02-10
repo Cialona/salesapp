@@ -1371,76 +1371,100 @@ class ClaudeAgent:
         return portal_pages
 
     def _detect_page_type(self, url: str, link_text: str, page_text: str) -> str:
-        """Detect the document type of a web page based on URL, title, and content."""
-        # Check URL + link text + first 1500 chars of content (not just 500)
-        combined = f"{url} {link_text or ''} {page_text[:1500]}".lower()
+        """Detect the document type of a web page based on URL, title, and content.
 
-        # Rules / technical guidelines (check first - most specific)
+        Uses two-phase detection:
+        1. URL/title indicators (highest priority - most reliable)
+        2. Content analysis (fallback for ambiguous pages)
+        """
+        url_title = f"{url} {link_text or ''}".lower()
+
+        # === PHASE 1: URL and title based detection (reliable, no content ambiguity) ===
+
+        # Rules from URL/title
+        if any(kw in url_title for kw in [
+            'design-regulation', 'design regulation', 'technical-regulation',
+            'technical regulation', 'technical-guideline', 'technical guideline',
+            'stand-build-rule', 'stand build rule', 'construction-rule',
+            'reglement-technique', 'regolamento-tecnico', 'reglamento-tecnico',
+            'technische-richtlijn', 'standbouwregels',
+        ]):
+            return 'rules'
+
+        # Schedule from URL/title
+        if any(kw in url_title for kw in [
+            'event-schedule', 'event schedule', 'build-up-schedule',
+            'dismantling-schedule', 'tear-down-schedule', 'move-in-schedule',
+            'setup-schedule', 'aufbau-und-abbau', 'opbouw-en-afbouw',
+        ]):
+            return 'schedule'
+
+        # Floorplan from URL/title
+        if any(kw in url_title for kw in [
+            'floorplan', 'floor-plan', 'floor plan', 'expo-floorplan',
+            'hall-plan', 'hallenplan', 'plattegrond', 'expocad', 'mapyourshow',
+            'planimetria',
+        ]):
+            return 'floorplan'
+
+        # Exhibitor manual from URL/title (checked AFTER specific types)
+        if any(kw in url_title for kw in [
+            'event-information', 'event information', 'event-guideline',
+            'event guideline', 'exhibitor-manual', 'exhibitor manual',
+            'exhibitor-handbook', 'exhibitor handbook', 'exhibitor-guide',
+            'exhibitor guide', 'welcome-pack', 'event-manual',
+            'exhibitor-info', 'exhibitor info',
+            'ausstellerhandbuch', 'manuel-exposant', 'manual-del-expositor',
+        ]):
+            return 'exhibitor_manual'
+
+        # === PHASE 2: Content analysis (for pages with generic URL/title) ===
+        combined = f"{url_title} {page_text[:1500]}".lower()
+
         if any(kw in combined for kw in [
             'stand build rule', 'construction rule', 'technical guideline',
             'technical regulation', 'stand design rule', 'design regulation',
             'design rule', 'height limit', 'technical specification',
-            'fire safety', 'electrical', 'construction requirement',
-            # German
+            'fire safety', 'construction requirement',
             'technische richtlinie', 'standbauvorgabe', 'bauvorschrift',
-            # French
             'reglement technique', 'règlement technique',
-            # Spanish
             'reglamento tecnico', 'regulación técnica',
-            # Italian
             'regolamento tecnico',
-            # Dutch
             'technische richtlijn', 'standbouwregels',
         ]):
             return 'rules'
 
-        # Schedule / build-up & tear-down
         if any(kw in combined for kw in [
             'event schedule', 'build-up schedule', 'build up schedule',
             'dismantling schedule', 'tear-down schedule', 'move-in schedule',
             'set-up schedule', 'build-up & dismantl', 'installation & dismantl',
             'setup and dismantle', 'setup & dismantle',
-            # German
             'aufbau und abbau', 'aufbauzeiten', 'abbauzeiten',
-            # French
             'calendrier de montage', 'montage et démontage',
-            # Spanish
             'calendario de montaje', 'montaje y desmontaje',
-            # Italian
             'calendario allestimento', 'allestimento e smontaggio',
-            # Dutch
             'opbouw en afbouw', 'opbouwschema',
         ]):
             return 'schedule'
 
-        # Floor plan
         if any(kw in combined for kw in [
             'floor plan', 'floorplan', 'hall plan', 'site map', 'venue map',
             'exhibition layout', 'expo floorplan',
             'hallenplan', 'plattegrond', 'expocad', 'mapyourshow',
-            # French
             'plan du salon', 'plan des halls',
-            # Spanish
             'plano de la feria', 'plano del recinto',
-            # Italian
             'pianta del salone', 'planimetria',
         ]):
             return 'floorplan'
 
-        # Exhibitor manual (broader match)
         if any(kw in combined for kw in [
             'exhibitor manual', 'exhibitor handbook', 'exhibitor guide',
             'welcome pack', 'event manual', 'event information',
             'exhibitor info', 'service documentation', 'exhibitor resource',
-            # German
             'ausstellerhandbuch', 'ausstellerinformation',
-            # French
             'manuel exposant', 'guide exposant',
-            # Spanish
             'manual del expositor', 'guía del expositor',
-            # Italian
             'manuale espositore', 'guida espositore',
-            # Dutch
             'handleiding exposant', 'exposanten handleiding',
         ]):
             return 'exhibitor_manual'
