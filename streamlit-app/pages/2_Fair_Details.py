@@ -367,9 +367,36 @@ with tab_raw:
     discovery_output = fair.get('discovery_output', {})
     debug_info = discovery_output.get('debug', {})
     discovery_log = debug_info.get('discovery_log', [])
+    discovery_summary = debug_info.get('discovery_summary', [])
 
+    # Compact summary (for quick sharing / troubleshooting)
+    if discovery_summary:
+        st.markdown("#### Compact Summary (voor troubleshooting)")
+        summary_text = "\n".join(discovery_summary)
+        st.code(summary_text, language=None)
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            st.download_button(
+                label="Download Summary (.txt)",
+                data=summary_text,
+                file_name=f"{fair_id}_summary.txt",
+                mime="text/plain",
+                key="dl_summary_txt"
+            )
+        with col_s2:
+            # Copy-friendly version for pasting into chat
+            st.download_button(
+                label="Download Summary (.md)",
+                data=summary_text,
+                file_name=f"{fair_id}_summary.md",
+                mime="text/markdown",
+                key="dl_summary_md"
+            )
+        st.markdown("---")
+
+    # Full detailed log (collapsed by default)
     if discovery_log:
-        st.markdown("#### 📋 Discovery Log (troubleshooting)")
+        st.markdown("#### Volledige Discovery Log (gedetailleerd)")
         st.caption(f"{len(discovery_log)} log entries beschikbaar")
 
         # Build markdown log document
@@ -388,7 +415,7 @@ with tab_raw:
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1:
             st.download_button(
-                label="📥 Download Discovery Log (.txt)",
+                label="Download Volledige Log (.txt)",
                 data=log_text,
                 file_name=f"{fair_id}_discovery_log.txt",
                 mime="text/plain",
@@ -396,14 +423,14 @@ with tab_raw:
             )
         with col_dl2:
             st.download_button(
-                label="📥 Download Discovery Log (.md)",
+                label="Download Volledige Log (.md)",
                 data=log_text,
                 file_name=f"{fair_id}_discovery_log.md",
                 mime="text/markdown",
                 key="dl_log_md"
             )
 
-        with st.expander("📋 Log bekijken", expanded=False):
+        with st.expander("Volledige log bekijken", expanded=False):
             st.code("\n".join(discovery_log), language=None)
 
         st.markdown("---")

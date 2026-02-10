@@ -125,6 +125,7 @@ class DebugInfo:
     candidates: Candidates = field(default_factory=Candidates)
     notes: List[str] = field(default_factory=list)
     discovery_log: List[str] = field(default_factory=list)  # Detailed step-by-step log
+    discovery_summary: List[str] = field(default_factory=list)  # Compact summary for sharing
 
 
 @dataclass
@@ -225,6 +226,7 @@ def output_to_dict(output: DiscoveryOutput) -> Dict[str, Any]:
             },
             'notes': output.debug.notes,
             'discovery_log': output.debug.discovery_log,
+            'discovery_summary': output.debug.discovery_summary,
         },
         'contact_info': {
             'emails': [
