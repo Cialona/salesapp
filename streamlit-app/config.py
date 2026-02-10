@@ -236,17 +236,17 @@ CUSTOM_CSS = f"""
         background: {CIALONA_NAVY};
     }}
 
-    [data-testid="stSidebar"] .stMarkdown {{
+    [data-testid="stSidebar"] > div > div > div > .stMarkdown {{
         color: white;
     }}
 
-    [data-testid="stSidebar"] .stMarkdown p {{
+    [data-testid="stSidebar"] > div > div > div > .stMarkdown p {{
         color: white !important;
     }}
 
-    [data-testid="stSidebar"] .stMarkdown h1,
-    [data-testid="stSidebar"] .stMarkdown h2,
-    [data-testid="stSidebar"] .stMarkdown h3 {{
+    [data-testid="stSidebar"] > div > div > div > .stMarkdown h1,
+    [data-testid="stSidebar"] > div > div > div > .stMarkdown h2,
+    [data-testid="stSidebar"] > div > div > div > .stMarkdown h3 {{
         color: white !important;
     }}
 
@@ -258,8 +258,25 @@ CUSTOM_CSS = f"""
         color: white !important;
     }}
 
-    [data-testid="stSidebar"] span {{
+    [data-testid="stSidebar"] .stFileUploader label {{
         color: white !important;
+    }}
+
+    /* Sidebar widget internals — keep dark text on white backgrounds */
+    [data-testid="stSidebar"] .stFileUploader section {{
+        color: {CIALONA_NAVY} !important;
+    }}
+
+    [data-testid="stSidebar"] .stFileUploader section span {{
+        color: {CIALONA_NAVY} !important;
+    }}
+
+    [data-testid="stSidebar"] .stFileUploader section button {{
+        color: {CIALONA_NAVY} !important;
+    }}
+
+    [data-testid="stSidebar"] .stFileUploader small {{
+        color: #6B7280 !important;
     }}
 
     /* Sidebar page links */
