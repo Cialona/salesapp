@@ -545,6 +545,17 @@ class ClaudeAgent:
                     urls_to_scan.insert(1, portal_url)  # Add right after base URL
                     self._log(f"    🌐 Web search found portal: {portal_url}")
 
+        # === PROBE COMMON PORTAL URL PATTERNS ===
+        # Try known portal URL patterns based on the fair's domain/org name
+        if fair_name:
+            self._log(f"🔍 Probing common portal URL patterns...")
+            probed_portals = await self._probe_portal_urls(base_url, fair_name)
+            for portal_url in probed_portals:
+                if portal_url not in results['exhibitor_pages']:
+                    results['exhibitor_pages'].insert(0, portal_url)
+                if portal_url not in urls_to_scan:
+                    urls_to_scan.insert(1, portal_url)
+
         # === PRIORITIZE DOCUMENT PAGES ===
         # These pages are most likely to have technical documents - scan them FIRST
         priority_document_paths = [
@@ -650,6 +661,17 @@ class ClaudeAgent:
                                 'source_url': url
                             })
                             self._log(f"    📧 Found email: {email_info.email}")
+
+                    # Extract external portal URLs from page HTML source
+                    # This catches URLs hidden in JavaScript, data attributes, or dynamic content
+                    portal_urls_from_html = await pre_scan_browser.extract_external_portal_urls()
+                    for portal_info in portal_urls_from_html:
+                        portal_url = portal_info['url']
+                        if portal_url not in results['exhibitor_pages']:
+                            results['exhibitor_pages'].insert(0, portal_url)
+                            if portal_url not in [u for u in found_pages_to_scan]:
+                                found_pages_to_scan.append(portal_url)
+                            self._log(f"    🔗 Portal URL in HTML source: {portal_url[:70]}")
 
                     # Process PDF links
                     for link in relevant_links.get('pdf_links', []):
@@ -899,6 +921,14 @@ class ClaudeAgent:
                     scanned_in_second_pass += 1
 
                     self._log(f"  ✓ Second-pass scan: {url}")
+
+                    # Extract external portal URLs from page HTML (catches hidden portal links)
+                    portal_urls_from_html = await pre_scan_browser.extract_external_portal_urls()
+                    for portal_info in portal_urls_from_html:
+                        portal_url = portal_info['url']
+                        if portal_url not in results['exhibitor_pages']:
+                            results['exhibitor_pages'].insert(0, portal_url)
+                            self._log(f"    🔗 Portal URL in HTML source (2nd pass): {portal_url[:70]}")
 
                     relevant_links = await pre_scan_browser.get_relevant_links()
 
@@ -1391,10 +1421,73 @@ class ClaudeAgent:
                 self._log(f"    Web search error: {e}")
                 continue
 
+        # Log search results summary
+        if found_pdfs:
+            for pdf in found_pdfs:
+                self._log(f"    📄 Web search result PDF: {pdf[:70]}")
+        if found_portals:
+            for portal in found_portals:
+                self._log(f"    🌐 Web search result portal: {portal[:70]}")
+        if not found_pdfs and not found_portals:
+            self._log(f"    ⚠️ Web search returned no useful results")
+
         return {
             'pdf_links': found_pdfs[:5],
             'portal_urls': found_portals[:5]
         }
+
+    async def _probe_portal_urls(self, base_url: str, fair_name: str) -> List[str]:
+        """
+        Probe common external portal URL patterns.
+        Tries to find exhibitor portals by checking if known URL patterns respond.
+        Works generically for all fairs - uses the fair's domain and common platform patterns.
+        """
+        import urllib.request
+        import urllib.error
+
+        parsed = urlparse(base_url)
+        domain = parsed.netloc.lower().replace('www.', '')
+        domain_parts = domain.split('.')
+        org_name = domain_parts[0] if domain_parts else ''
+
+        # Clean fair name for URL patterns
+        clean_name = re.sub(r'\s*20\d{2}\s*', '', fair_name).strip().lower()
+        name_parts = clean_name.replace(' ', '').replace('-', '')
+
+        # Generate candidate portal URLs based on common patterns
+        candidates = []
+
+        # Salesforce community patterns: {org}.my.site.com/{fair}oem/s/Home
+        for org in [org_name, name_parts]:
+            if len(org) >= 2:
+                candidates.append(f"https://{org}.my.site.com/{org}oem/s/Home")
+                candidates.append(f"https://{org}.my.site.com/s/Home")
+                candidates.append(f"https://{org}.my.site.com/")
+
+        # Deduplicate
+        seen = set()
+        unique_candidates = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                unique_candidates.append(c)
+
+        # Probe each candidate
+        found = []
+        for url in unique_candidates[:6]:  # Max 6 probes to keep it fast
+            try:
+                req = urllib.request.Request(url, method='HEAD')
+                req.add_header('User-Agent', 'Mozilla/5.0 (compatible; TradeFairBot/1.0)')
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    if response.status < 400:
+                        found.append(url)
+                        self._log(f"    ✅ Portal URL probe found: {url}")
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
+                continue
+            except Exception:
+                continue
+
+        return found
 
     async def run(self, input_data: TestCaseInput) -> DiscoveryOutput:
         """Run the discovery agent."""
@@ -1999,6 +2092,14 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             result_text = f"🔍 DEEP SCAN RESULTATEN voor {state.url}\n"
             result_text += "=" * 60 + "\n\n"
 
+            # External portal URLs (CRITICAL - these often have the most important docs!)
+            portal_urls = await self.browser.extract_external_portal_urls()
+            if portal_urls:
+                result_text += "🌐🌐🌐 EXTERNE PORTAL LINKS GEVONDEN:\n"
+                for portal in portal_urls:
+                    result_text += f"  🌐 {portal['url']}\n"
+                result_text += "\n⚠️ BELANGRIJK: Bezoek deze portals met goto_url! Ze bevatten vaak exhibitor manuals, rules en schedules!\n\n"
+
             # High-value documents first
             if relevant_links.get('high_value_links'):
                 result_text += "⭐⭐⭐ BELANGRIJKE DOCUMENTEN (technical/regulations/provisions):\n"
@@ -2024,8 +2125,24 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                         seen_urls.add(link.url)
                         result_text += f"  • {link.text[:60]}\n    URL: {link.url}\n"
 
+            # External links (non-portal) that may be interesting
+            all_links = relevant_links.get('all_links', [])
+            external_links = []
+            current_domain = urlparse(state.url).netloc
+            for link in all_links:
+                try:
+                    link_host = urlparse(link.url).netloc
+                    if link_host and link_host != current_domain:
+                        external_links.append(link)
+                except:
+                    pass
+            if external_links:
+                result_text += f"\n🔗 EXTERNE LINKS ({len(external_links)} gevonden):\n"
+                for link in external_links[:15]:
+                    result_text += f"  • {link.text[:50] or 'Link'}\n    URL: {link.url}\n"
+
             result_text += "\n" + "=" * 60
-            result_text += "\n💡 TIP: Gebruik goto_url om direct naar een PDF te navigeren!"
+            result_text += "\n💡 TIP: Gebruik goto_url om direct naar een PDF of portal te navigeren!"
 
             return [{"type": "text", "text": result_text}]
 
