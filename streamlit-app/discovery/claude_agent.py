@@ -310,18 +310,30 @@ Geef je resultaten als JSON met ALLEEN de missende documenten:
 class ClaudeAgent:
     """Claude Computer Use agent for trade fair discovery."""
 
+    # Discovery phases with typical durations (seconds) for progress estimation
+    PHASES = [
+        {"id": "url_lookup",    "label": "Website zoeken",           "pct_start": 0,  "pct_end": 10,  "est_secs": 10},
+        {"id": "prescan",       "label": "Website scannen",          "pct_start": 10, "pct_end": 35,  "est_secs": 40},
+        {"id": "portal_scan",   "label": "Portal detectie",          "pct_start": 35, "pct_end": 50,  "est_secs": 30},
+        {"id": "classification","label": "Document classificatie",    "pct_start": 50, "pct_end": 65,  "est_secs": 25},
+        {"id": "browser_agent", "label": "Browser verificatie",      "pct_start": 65, "pct_end": 90,  "est_secs": 90},
+        {"id": "results",       "label": "Resultaten verwerken",     "pct_start": 90, "pct_end": 100, "est_secs": 5},
+    ]
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         max_iterations: int = 40,
         debug: bool = False,
-        on_status: Optional[Callable[[str], None]] = None
+        on_status: Optional[Callable[[str], None]] = None,
+        on_phase: Optional[Callable[[str], None]] = None
     ):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.browser = BrowserController(1024, 768)
         self.max_iterations = max_iterations
         self.debug = debug
         self.on_status = on_status or (lambda x: None)
+        self.on_phase = on_phase or (lambda x: None)
         self._discovery_log: List[str] = []  # Detailed log for troubleshooting
 
     def _log(self, message: str) -> None:
@@ -1631,6 +1643,7 @@ class ClaudeAgent:
 
         try:
             # PHASE 1: Pre-scan website for documents (HTML-based, fast)
+            self.on_phase("prescan")
             self._log("=" * 60)
             self._log("FASE 1: PRE-SCAN WEBSITE")
             self._log("=" * 60)
@@ -1659,6 +1672,7 @@ class ClaudeAgent:
                 # These portals have web page content (not PDFs) with rules, schedules, etc.
                 self._log("")
                 self._log("=" * 60)
+                self.on_phase("portal_scan")
                 self._log("FASE 1.25: PORTAL DETECTIE & DEEP SCAN")
                 self._log("=" * 60)
                 portal_pages = []
@@ -1689,6 +1703,7 @@ class ClaudeAgent:
                 # PHASE 1.5: Classify found documents with LLM (STRICT validation)
                 self._log("")
                 self._log("=" * 60)
+                self.on_phase("classification")
                 self._log("FASE 1.5: DOCUMENT CLASSIFICATIE (LLM)")
                 self._log("=" * 60)
                 if pre_scan_results['pdf_links'] or portal_pages:
@@ -1817,6 +1832,7 @@ class ClaudeAgent:
 
             # EARLY RETURN: If classification found enough documents, skip browser agent
             if skip_browser_agent and classification_result:
+                self.on_phase("results")
                 self._log("🚀 Building output from pre-scan classification (skipping browser agent)...")
                 output = self._build_output_from_classification(
                     classification_result, output, input_data, pre_scan_results, start_time
@@ -1838,6 +1854,7 @@ class ClaudeAgent:
             # PHASE 2: Launch browser for visual verification
             self._log("")
             self._log("=" * 60)
+            self.on_phase("browser_agent")
             self._log("FASE 2: BROWSER AGENT (Computer Use)")
             self._log("=" * 60)
             await self.browser.launch()
@@ -2181,6 +2198,7 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             # Attach the full discovery log for troubleshooting
             self._log("")
             self._log("=" * 60)
+            self.on_phase("results")
             self._log("FASE 3: RESULTAAT SAMENVATTING")
             self._log("=" * 60)
             self._log(f"Floorplan: {output.documents.floorplan_url or 'NIET GEVONDEN'}")
