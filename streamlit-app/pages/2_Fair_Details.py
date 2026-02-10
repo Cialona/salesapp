@@ -145,6 +145,8 @@ with tab_docs:
 
     # Helper function for document card
     def render_doc_card(doc_key: str, url_key: str, col):
+        from urllib.parse import quote
+
         doc_info = DOCUMENT_TYPES.get(doc_key, {})
         raw_url = docs.get(url_key)
 
@@ -154,10 +156,15 @@ with tab_docs:
             if isinstance(raw_url, str) and raw_url.startswith('http'):
                 url = raw_url.strip()
             elif isinstance(raw_url, (list, tuple)) and len(raw_url) > 0:
-                # Handle case where URL is accidentally a list
                 first = raw_url[0]
                 if isinstance(first, str) and first.startswith('http'):
                     url = first.strip()
+
+        # Encode spaces and special chars in URL path for link_button compatibility
+        if url and ' ' in url:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            url = urlunparse(parsed._replace(path=quote(parsed.path, safe='/')))
 
         found = url is not None
 
@@ -179,11 +186,7 @@ with tab_docs:
             """, unsafe_allow_html=True)
 
             if found:
-                try:
-                    st.link_button("📥 Openen", url, use_container_width=True, key=f"open_{doc_key}")
-                except Exception:
-                    # Fallback to markdown link if link_button fails
-                    st.markdown(f"[📥 Openen]({url})")
+                st.link_button("📥 Openen", url, use_container_width=True, key=f"open_{doc_key}")
             else:
                 st.button("❌ Niet gevonden", disabled=True, use_container_width=True, key=f"missing_{doc_key}")
 
