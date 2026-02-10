@@ -4,6 +4,7 @@ View detailed information about a specific fair.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 from pathlib import Path
 import sys
 from datetime import datetime
@@ -15,6 +16,24 @@ from config import (
     CUSTOM_CSS, CIALONA_ORANGE, CIALONA_NAVY, APP_ICON,
     DOCUMENT_TYPES, get_doc_chip_html
 )
+
+
+def copy_button(text: str, label: str = "📋 Kopieer", btn_id: str = "copy", bg: str = "#0369A1"):
+    """Render an HTML/JS button that copies text to clipboard."""
+    import html as html_mod
+    safe_text = html_mod.escape(text).replace("'", "\\'").replace("\n", "\\n")
+    components.html(f"""
+    <button id="{btn_id}" onclick="
+        navigator.clipboard.writeText('{safe_text}').then(function() {{
+            document.getElementById('{btn_id}').innerText = '✅ Gekopieerd!';
+            setTimeout(function() {{ document.getElementById('{btn_id}').innerText = '{label}'; }}, 1500);
+        }});
+    " style="
+        background: {bg}; color: white; border: none; padding: 0.5rem 1rem;
+        border-radius: 6px; cursor: pointer; font-size: 0.9rem; width: 100%;
+    ">{label}</button>
+    """, height=42)
+
 
 # Page configuration
 st.set_page_config(
@@ -28,12 +47,16 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
-    st.markdown(f"""
-    <div style="text-align: center; padding: 1rem;">
-        <h2 style="color: {CIALONA_ORANGE}; margin: 0;">CIALONA</h2>
-        <p style="color: white; font-size: 0.8rem; margin: 0;">Eye for Attention</p>
-    </div>
-    """, unsafe_allow_html=True)
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=200)
+    else:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 1rem;">
+            <h2 style="color: {CIALONA_ORANGE}; margin: 0;">CIALONA</h2>
+            <p style="color: white; font-size: 0.8rem; margin: 0;">Eye for Attention</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -244,27 +267,50 @@ with tab_contact:
     contact_info = discovery_output.get('contact_info', {})
     email_draft = discovery_output.get('email_draft_if_missing')
 
-    # Show discovered emails
+    # Show recommended email prominently
+    recommended_email = contact_info.get('recommended_email')
+    recommended_reason = contact_info.get('recommended_email_reason', '')
     emails = contact_info.get('emails', [])
-    if emails:
-        st.markdown("#### 📬 Gevonden Emailadressen")
-        for email_data in emails:
-            email = email_data.get('email', '')
-            context = email_data.get('context', '')
-            source = email_data.get('source_url', '')
 
-            col_email, col_action = st.columns([3, 1])
-            with col_email:
-                st.markdown(f"""
-                <div style="background: #F0F9FF; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;
-                            border: 1px solid #BAE6FD;">
-                    <strong style="color: #0369A1;">📧 {email}</strong>
-                    {f'<br><span style="color: #6B7280; font-size: 0.8rem;">{context[:50]}...</span>' if context else ''}
-                </div>
-                """, unsafe_allow_html=True)
-            with col_action:
-                st.link_button("✉️ Mail", f"mailto:{email}", use_container_width=True)
-    else:
+    if recommended_email:
+        st.markdown("#### ⭐ Aanbevolen Emailadres")
+        col_rec, col_rec_action = st.columns([3, 1])
+        with col_rec:
+            st.markdown(f"""
+            <div style="background: #ECFDF5; border-radius: 8px; padding: 1rem; margin-bottom: 0.5rem;
+                        border: 2px solid #059669;">
+                <strong style="color: #065F46; font-size: 1.1rem;">⭐ {recommended_email}</strong>
+                <br><span style="color: #047857; font-size: 0.85rem;">{recommended_reason}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_rec_action:
+            copy_button(recommended_email, "📋 Kopieer", btn_id="copy_rec", bg="#059669")
+
+    # Show all other emails in a collapsible section
+    if emails:
+        other_emails = [e for e in emails if e.get('email') != recommended_email]
+        label = f"Alle gevonden emailadressen ({len(emails)})"
+        with st.expander(label, expanded=not recommended_email):
+            for email_data in emails:
+                email = email_data.get('email', '')
+                context = email_data.get('context', '')
+                is_recommended = email == recommended_email
+
+                col_email, col_action = st.columns([3, 1])
+                with col_email:
+                    border_color = "#059669" if is_recommended else "#BAE6FD"
+                    bg_color = "#ECFDF5" if is_recommended else "#F0F9FF"
+                    prefix = "⭐ " if is_recommended else ""
+                    st.markdown(f"""
+                    <div style="background: {bg_color}; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;
+                                border: 1px solid {border_color};">
+                        <strong style="color: #0369A1;">{prefix}{email}</strong>
+                        {f'<br><span style="color: #6B7280; font-size: 0.8rem;">{context[:80]}</span>' if context else ''}
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_action:
+                    copy_button(email, "📋 Kopieer", btn_id=f"copy_{email.replace('@','_').replace('.','_')}")
+    elif not recommended_email:
         st.info("Geen emailadressen gevonden tijdens de discovery.")
 
     st.markdown("---")

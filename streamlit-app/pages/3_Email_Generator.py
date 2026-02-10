@@ -4,8 +4,10 @@ Generate emails to request missing documents from fair organizers.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 from pathlib import Path
 import sys
+import html as html_mod
 from urllib.parse import quote
 
 # Add parent directory to path for imports
@@ -28,12 +30,16 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
-    st.markdown(f"""
-    <div style="text-align: center; padding: 1rem;">
-        <h2 style="color: {CIALONA_ORANGE}; margin: 0;">CIALONA</h2>
-        <p style="color: white; font-size: 0.8rem; margin: 0;">Eye for Attention</p>
-    </div>
-    """, unsafe_allow_html=True)
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=200)
+    else:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 1rem;">
+            <h2 style="color: {CIALONA_ORANGE}; margin: 0;">CIALONA</h2>
+            <p style="color: white; font-size: 0.8rem; margin: 0;">Eye for Attention</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -117,10 +123,13 @@ st.markdown("### ✉️ Email Configuratie")
 col_config1, col_config2 = st.columns(2)
 
 with col_config1:
-    # Contact email (saved per fair)
+    # Contact email — default to recommended email from discovery if not manually set
+    discovery_output = fair.get('discovery_output', {})
+    recommended = discovery_output.get('contact_info', {}).get('recommended_email', '')
+    default_email = fair.get('contact_email', '') or recommended
     contact_email = st.text_input(
         "Email Organisatie *",
-        value=fair.get('contact_email', ''),
+        value=default_email,
         placeholder="exhibitor@messefrankfurt.com"
     )
 
@@ -255,34 +264,45 @@ if selected_docs:
     st.markdown("---")
     st.markdown("### 🚀 Verzenden")
 
-    # Create mailto link
-    mailto_link = f"mailto:{contact_email}?subject={quote(edited_subject)}&body={quote(edited_body)}"
+    # Build full email text for clipboard (subject + body)
+    full_email_text = f"Onderwerp: {edited_subject}\nAan: {contact_email}\n\n{edited_body}"
+    safe_full = html_mod.escape(full_email_text).replace("'", "\\'").replace("\n", "\\n")
+    safe_body = html_mod.escape(edited_body).replace("'", "\\'").replace("\n", "\\n")
+    safe_email = html_mod.escape(contact_email).replace("'", "\\'")
 
     col_send1, col_send2, col_send3 = st.columns(3)
 
     with col_send1:
         if contact_email:
-            st.markdown(f"""
-            <a href="{mailto_link}" target="_blank" style="
-                display: inline-block;
+            components.html(f"""
+            <button id="copy_full" onclick="
+                navigator.clipboard.writeText('{safe_full}').then(function() {{
+                    document.getElementById('copy_full').innerHTML = '✅ Gekopieerd!';
+                    setTimeout(function() {{ document.getElementById('copy_full').innerHTML = '📋 Kopieer Volledige Email'; }}, 1500);
+                }});
+            " style="
                 background: linear-gradient(135deg, {CIALONA_ORANGE} 0%, #E8850F 100%);
-                color: white;
-                padding: 0.75rem 1.5rem;
-                border-radius: 8px;
-                text-decoration: none;
-                font-weight: 500;
-                text-align: center;
-                width: 100%;
-            ">
-                📧 Open in Outlook
-            </a>
-            """, unsafe_allow_html=True)
+                color: white; border: none; padding: 0.75rem 1.5rem;
+                border-radius: 8px; cursor: pointer; font-weight: 500;
+                text-align: center; width: 100%; font-size: 0.95rem;
+            ">📋 Kopieer Volledige Email</button>
+            """, height=46)
         else:
             st.warning("Vul eerst een email adres in")
 
     with col_send2:
-        # Copy to clipboard button
-        st.code(edited_body, language=None)
+        components.html(f"""
+        <button id="copy_body" onclick="
+            navigator.clipboard.writeText('{safe_body}').then(function() {{
+                document.getElementById('copy_body').innerHTML = '✅ Gekopieerd!';
+                setTimeout(function() {{ document.getElementById('copy_body').innerHTML = '📝 Kopieer Alleen Tekst'; }}, 1500);
+            }});
+        " style="
+            background: #0369A1; color: white; border: none; padding: 0.75rem 1.5rem;
+            border-radius: 8px; cursor: pointer; font-weight: 500;
+            text-align: center; width: 100%; font-size: 0.95rem;
+        ">📝 Kopieer Alleen Tekst</button>
+        """, height=46)
 
     with col_send3:
         # Mark as contacted
@@ -298,10 +318,10 @@ if selected_docs:
     st.markdown("---")
     st.info("""
     **Hoe te gebruiken:**
-    1. Vul het email adres van de beursorganisatie in
+    1. Controleer het email adres van de beursorganisatie (wordt automatisch ingevuld)
     2. Pas eventueel de email tekst aan
-    3. Klik op "Open in Outlook" om de email in je mailprogramma te openen
-    4. Controleer en verstuur de email
+    3. Klik op "Kopieer Volledige Email" om alles (incl. onderwerp en adres) te kopieren
+    4. Open Outlook, maak een nieuw bericht, en plak de tekst
     5. Klik op "Markeer als Gecontacteerd" om bij te houden dat je contact hebt opgenomen
     """)
 

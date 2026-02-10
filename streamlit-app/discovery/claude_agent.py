@@ -310,18 +310,30 @@ Geef je resultaten als JSON met ALLEEN de missende documenten:
 class ClaudeAgent:
     """Claude Computer Use agent for trade fair discovery."""
 
+    # Discovery phases with typical durations (seconds) for progress estimation
+    PHASES = [
+        {"id": "url_lookup",    "label": "Website zoeken",           "pct_start": 0,  "pct_end": 10,  "est_secs": 10},
+        {"id": "prescan",       "label": "Website scannen",          "pct_start": 10, "pct_end": 35,  "est_secs": 40},
+        {"id": "portal_scan",   "label": "Portal detectie",          "pct_start": 35, "pct_end": 50,  "est_secs": 30},
+        {"id": "classification","label": "Document classificatie",    "pct_start": 50, "pct_end": 65,  "est_secs": 25},
+        {"id": "browser_agent", "label": "Browser verificatie",      "pct_start": 65, "pct_end": 90,  "est_secs": 90},
+        {"id": "results",       "label": "Resultaten verwerken",     "pct_start": 90, "pct_end": 100, "est_secs": 5},
+    ]
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         max_iterations: int = 40,
         debug: bool = False,
-        on_status: Optional[Callable[[str], None]] = None
+        on_status: Optional[Callable[[str], None]] = None,
+        on_phase: Optional[Callable[[str], None]] = None
     ):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.browser = BrowserController(1024, 768)
         self.max_iterations = max_iterations
         self.debug = debug
         self.on_status = on_status or (lambda x: None)
+        self.on_phase = on_phase or (lambda x: None)
         self._discovery_log: List[str] = []  # Detailed log for troubleshooting
 
     def _log(self, message: str) -> None:
@@ -1640,6 +1652,7 @@ class ClaudeAgent:
                 return output
 
             # PHASE 1: Pre-scan website for documents (HTML-based, fast)
+            self.on_phase("prescan")
             self._log("=" * 60)
             self._log("FASE 1: PRE-SCAN WEBSITE")
             self._log("=" * 60)
@@ -1667,6 +1680,7 @@ class ClaudeAgent:
             # These portals have web page content (not PDFs) with rules, schedules, etc.
             self._log("")
             self._log("=" * 60)
+            self.on_phase("portal_scan")
             self._log("FASE 1.25: PORTAL DETECTIE & DEEP SCAN")
             self._log("=" * 60)
             portal_pages = []
@@ -1697,6 +1711,7 @@ class ClaudeAgent:
             # PHASE 1.5: Classify found documents with LLM (STRICT validation)
             self._log("")
             self._log("=" * 60)
+            self.on_phase("classification")
             self._log("FASE 1.5: DOCUMENT CLASSIFICATIE (LLM)")
             self._log("=" * 60)
             if pre_scan_results['pdf_links'] or portal_pages:
@@ -1825,6 +1840,7 @@ class ClaudeAgent:
 
             # EARLY RETURN: If classification found enough documents, skip browser agent
             if skip_browser_agent and classification_result:
+                self.on_phase("results")
                 self._log("🚀 Building output from pre-scan classification (skipping browser agent)...")
                 output = self._build_output_from_classification(
                     classification_result, output, input_data, pre_scan_results, start_time
@@ -1846,6 +1862,7 @@ class ClaudeAgent:
             # PHASE 2: Launch browser for visual verification
             self._log("")
             self._log("=" * 60)
+            self.on_phase("browser_agent")
             self._log("FASE 2: BROWSER AGENT (Computer Use)")
             self._log("=" * 60)
             await self.browser.launch()
@@ -2189,6 +2206,7 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             # Attach the full discovery log for troubleshooting
             self._log("")
             self._log("=" * 60)
+            self.on_phase("results")
             self._log("FASE 3: RESULTAAT SAMENVATTING")
             self._log("=" * 60)
             self._log(f"Floorplan: {output.documents.floorplan_url or 'NIET GEVONDEN'}")
@@ -2208,6 +2226,9 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                         source_url=email_data.get('source_url', '')
                     ))
                 self._log(f"Added {len(pre_scan_results['emails'])} contact emails to output")
+
+            # Select recommended email for fair organization
+            self._select_recommended_email(output)
 
             # Generate email draft if documents are missing
             output.email_draft_if_missing = self._generate_email_draft(output, input_data)
@@ -2599,6 +2620,110 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
         except json.JSONDecodeError as e:
             output.debug.notes.append(f"JSON parse error: {e}")
 
+    def _select_recommended_email(self, output: DiscoveryOutput) -> None:
+        """
+        Rank all discovered emails and pick the best one for contacting the fair organization.
+        Sets output.contact_info.recommended_email and recommended_email_reason.
+        """
+        if not output.contact_info.emails:
+            return
+
+        official_domain = output.official_domain or ''
+        fair_name_lower = (output.fair_name or '').lower()
+
+        # Prefixes that strongly suggest a fair-organization contact
+        org_prefixes = [
+            'info', 'contact', 'exhibitor', 'exposant', 'aussteller',
+            'expo', 'fair', 'messe', 'salon', 'beurs', 'stand',
+            'technical', 'service', 'logistics', 'operations',
+        ]
+
+        # Prefixes to penalise — unlikely to be the right contact
+        bad_prefixes = [
+            'noreply', 'no-reply', 'newsletter', 'marketing', 'hr',
+            'jobs', 'career', 'webmaster', 'privacy', 'press',
+            'media', 'sales', 'recruitment', 'billing', 'invoice',
+            'support',  # often generic IT support, not fair org
+        ]
+
+        best_score = -999
+        best_email = None
+        best_reason_parts = []
+
+        for ce in output.contact_info.emails:
+            email = ce.email.lower().strip()
+            local_part = email.split('@')[0] if '@' in email else ''
+            domain = email.split('@')[1] if '@' in email else ''
+            context_lower = (ce.context or '').lower()
+            source_url = (ce.source_url or '').lower()
+
+            score = 0
+            reasons = []
+
+            # 1. Domain matches the fair's official website → strong signal
+            if official_domain and official_domain in domain:
+                score += 30
+                reasons.append("domein komt overeen met beurswebsite")
+
+            # 2. Good prefix
+            for prefix in org_prefixes:
+                if local_part.startswith(prefix) or local_part == prefix:
+                    score += 20
+                    reasons.append(f"adresprefix '{local_part}' duidt op organisatie")
+                    break
+
+            # 3. Bad prefix
+            for prefix in bad_prefixes:
+                if local_part.startswith(prefix):
+                    score -= 40
+                    reasons.append(f"adresprefix '{local_part}' is waarschijnlijk niet relevant")
+                    break
+
+            # 4. Context mentions exhibitor / stand / logistics / technical
+            exhibitor_keywords = [
+                'exhibitor', 'exposant', 'aussteller', 'stand',
+                'technical', 'logistics', 'service', 'bouw', 'construction',
+            ]
+            for kw in exhibitor_keywords:
+                if kw in context_lower:
+                    score += 10
+                    reasons.append(f"context bevat '{kw}'")
+                    break
+
+            # 5. Source type bonus — mailto links are intentional
+            if ce.context and ce.context in ('mailto',):
+                score += 5
+            # Source from contact page
+            source_type = getattr(ce, 'source_type', '') or ''
+            if 'contact' in source_url or 'contact' in source_type:
+                score += 5
+                reasons.append("gevonden op contactpagina")
+
+            # 6. Extracted from PDF (exhibitor manual) → good signal
+            if 'pdf' in context_lower or 'extracted from pdf' in context_lower:
+                score += 8
+                reasons.append("gevonden in PDF document")
+
+            # 7. Penalise generic image/icon filenames accidentally captured
+            if any(x in email for x in ['.png', '.jpg', '.gif', '.svg']):
+                score -= 100
+
+            if score > best_score:
+                best_score = score
+                best_email = ce.email
+                best_reason_parts = reasons
+
+        if best_email and best_score > 0:
+            reason = '; '.join(best_reason_parts) if best_reason_parts else 'best beschikbare match'
+            output.contact_info.recommended_email = best_email
+            output.contact_info.recommended_email_reason = reason
+            self._log(f"⭐ Aanbevolen email: {best_email} (score {best_score}: {reason})")
+        elif best_email:
+            # All scored ≤ 0 — still pick the best but flag uncertainty
+            output.contact_info.recommended_email = best_email
+            output.contact_info.recommended_email_reason = "geen sterke indicatie — controleer handmatig"
+            self._log(f"⚠️ Aanbevolen email (lage zekerheid): {best_email}")
+
     def _generate_email_draft(self, output: DiscoveryOutput, input_data: TestCaseInput) -> Optional[str]:
         """
         Generate an email draft requesting missing documents.
@@ -2799,6 +2924,9 @@ Kind regards,
                         source_url=email_data.get('source_url', '')
                     ))
             self._log(f"Added {len(pre_scan_results['emails'])} contact emails from webpage")
+
+        # Select recommended email for fair organization
+        self._select_recommended_email(output)
 
         # Generate email draft if anything is still missing
         output.email_draft_if_missing = self._generate_email_draft(output, input_data)

@@ -38,6 +38,8 @@ class ContactInfo:
     emails: List[ContactEmail] = field(default_factory=list)
     phone: Optional[str] = None
     organization_name: Optional[str] = None
+    recommended_email: Optional[str] = None
+    recommended_email_reason: Optional[str] = None
 
 
 @dataclass
@@ -231,6 +233,8 @@ def output_to_dict(output: DiscoveryOutput) -> Dict[str, Any]:
             ],
             'phone': output.contact_info.phone,
             'organization_name': output.contact_info.organization_name,
+            'recommended_email': output.contact_info.recommended_email,
+            'recommended_email_reason': output.contact_info.recommended_email_reason,
         },
         'email_draft_if_missing': output.email_draft_if_missing,
         'year': output.year,
