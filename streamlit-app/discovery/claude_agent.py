@@ -1607,22 +1607,48 @@ class ClaudeAgent:
             'getting-started', 'rules', 'schedule', 'event-info', 'handbook',
         ]
 
-        for query in search_queries[:4]:  # Check 4 searches
+        # Rotate User-Agents to reduce chance of being blocked
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+        ]
+
+        for qi, query in enumerate(search_queries[:4]):  # Check 4 searches
             try:
                 self._log(f"    🔍 Web search: '{query}'")
                 # Use DuckDuckGo HTML search
                 encoded_query = urllib.parse.quote_plus(query)
                 search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
-                req = urllib.request.Request(
-                    search_url,
-                    headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                    }
-                )
+                # Try up to 2 attempts with increasing timeout
+                html = None
+                for attempt, timeout_val in enumerate([15, 25]):
+                    try:
+                        req = urllib.request.Request(
+                            search_url,
+                            headers={
+                                'User-Agent': user_agents[(qi + attempt) % len(user_agents)],
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.5',
+                            }
+                        )
+                        with urllib.request.urlopen(req, timeout=timeout_val) as response:
+                            html = response.read().decode('utf-8', errors='ignore')
+                        break  # Success
+                    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
+                        if attempt == 0:
+                            await asyncio.sleep(2)  # Wait before retry
+                        continue
 
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode('utf-8', errors='ignore')
+                if not html:
+                    self._log(f"    Web search error: timed out after retries")
+                    continue
+
+                # Small delay between queries to avoid rate limiting
+                if qi < 3:
+                    await asyncio.sleep(1)
 
                 # Extract URLs from DuckDuckGo results
                 # DDG returns results in result__a links, but href format varies:
