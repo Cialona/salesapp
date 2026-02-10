@@ -1604,7 +1604,17 @@ class ClaudeAgent:
             'exhibitor', 'manual', 'welcome', 'technical', 'regulation',
             'guideline', 'stand-build', 'standbuild', 'floorplan', 'floor-plan',
             'getting-started', 'rules', 'schedule', 'event-info', 'handbook',
+            'terms_and_conditions', 'terms-and-conditions',
         ]
+
+        # Add fair name words as dynamic PDF keywords
+        # e.g. "GreenTech Amsterdam" -> also match PDFs containing "greentech" or "amsterdam"
+        name_words = clean_name.lower().split()
+        stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
+                     'fair', 'trade', 'show', 'exhibition', 'expo', 'messe', 'fiera', 'salon'}
+        for word in name_words:
+            if word not in stop_words and len(word) >= 4:
+                fair_pdf_keywords.append(word)
 
         # Launch a lightweight Playwright browser for searches
         # (urllib GET requests to DuckDuckGo are blocked in some environments)
