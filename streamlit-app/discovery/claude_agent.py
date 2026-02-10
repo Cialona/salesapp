@@ -2132,6 +2132,44 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                     output.quality.exhibitor_directory = "strong"
                     output.primary_reasoning.exhibitor_directory = "PRE-SCAN: Exhibitor directory page"
 
+                # Merge schedule page URL from classification
+                if not output.documents.schedule_page_url and classification_result.schedule:
+                    if classification_result.schedule.confidence in ['strong', 'partial']:
+                        output.documents.schedule_page_url = classification_result.schedule.url
+                        output.quality.schedule = classification_result.schedule.confidence
+                        output.primary_reasoning.schedule = f"PRE-SCAN: {classification_result.schedule.reason}"
+
+                # Merge extracted schedule entries from classification
+                if classification_result.aggregated_schedule:
+                    seen_build_up = {(e.date, e.time) for e in output.schedule.build_up}
+                    for entry in classification_result.aggregated_schedule.build_up:
+                        if entry.get('date'):
+                            dedup_key = (entry.get('date'), entry.get('time', ''))
+                            if dedup_key not in seen_build_up:
+                                seen_build_up.add(dedup_key)
+                                output.schedule.build_up.append(ScheduleEntry(
+                                    date=entry.get('date'),
+                                    time=entry.get('time', ''),
+                                    description=entry.get('description', 'Build-up'),
+                                    source_url=classification_result.aggregated_schedule.source_url or output.documents.schedule_page_url or ''
+                                ))
+                    seen_tear_down = {(e.date, e.time) for e in output.schedule.tear_down}
+                    for entry in classification_result.aggregated_schedule.tear_down:
+                        if entry.get('date'):
+                            dedup_key = (entry.get('date'), entry.get('time', ''))
+                            if dedup_key not in seen_tear_down:
+                                seen_tear_down.add(dedup_key)
+                                output.schedule.tear_down.append(ScheduleEntry(
+                                    date=entry.get('date'),
+                                    time=entry.get('time', ''),
+                                    description=entry.get('description', 'Tear-down'),
+                                    source_url=classification_result.aggregated_schedule.source_url or output.documents.schedule_page_url or ''
+                                ))
+                    if output.schedule.build_up or output.schedule.tear_down:
+                        if not output.quality.schedule or output.quality.schedule != 'strong':
+                            output.quality.schedule = "strong"
+                        self._log(f"📅 Merged schedule from classification: {len(output.schedule.build_up)} build-up, {len(output.schedule.tear_down)} tear-down")
+
             output.debug.notes.append(f"Agent completed in {iteration} iterations")
             output.debug.notes.append(f"Auto-mapped {len(downloads)} downloaded files to output fields")
             output.debug.notes.append(f"Total time: {int(time.time() - start_time)}s")
