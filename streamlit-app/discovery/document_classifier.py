@@ -513,6 +513,32 @@ class DocumentClassifier:
                 setattr(result, mapped_type, classification)
                 self.log(f"  ~ Portal page [{mapped_type}]: partial")
 
+        # Post-process: promote PARTIAL portal pages to STRONG if they're from a
+        # year-verified portal. OEM portals are edition-specific, so if one page from
+        # the portal has year verification, sibling pages can inherit it.
+        verified_portal_bases = set()
+        for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
+            cls = getattr(result, doc_type, None)
+            if cls and cls.confidence == 'strong' and cls.year_verified and cls.url:
+                parsed = urlparse(cls.url)
+                # Extract portal base: host + first path segment (e.g., /mwcoem)
+                path_parts = parsed.path.strip('/').split('/')
+                base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
+                verified_portal_bases.add(base)
+
+        if verified_portal_bases:
+            for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
+                cls = getattr(result, doc_type, None)
+                if cls and cls.confidence == 'partial' and not cls.year_verified and cls.fair_verified:
+                    parsed = urlparse(cls.url)
+                    path_parts = parsed.path.strip('/').split('/')
+                    base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
+                    if base in verified_portal_bases:
+                        cls.year_verified = True
+                        cls.confidence = 'strong'
+                        cls.is_validated = True
+                        self.log(f"  ⬆ Promoted [{doc_type}] to STRONG (year inherited from same portal)")
+
         # For portal home pages: if we have a portal URL but haven't assigned exhibitor_manual,
         # check if the portal home page qualifies as exhibitor manual
         if not result.exhibitor_manual:
