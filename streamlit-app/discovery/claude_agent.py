@@ -1051,14 +1051,15 @@ class ClaudeAgent:
         self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
         return results
 
-    def _find_portal_urls(self, pre_scan_results: Dict) -> List[str]:
+    def _find_portal_urls(self, pre_scan_results: Dict, fair_name: str = "") -> List[str]:
         """
         Find external portal URLs from prescan results.
         These are URLs on external platforms (Salesforce, OEM portals, etc.)
         that likely contain exhibitor information as web pages.
 
         Filters out Salesforce infrastructure URLs and FileDownload links.
-        Prioritizes actual portal content pages (*/s/Home, */s/...).
+        Prefers /s/Home as entry point per portal.
+        Sorts portals by relevance to fair name (matching abbreviations first).
         """
         from .browser_controller import BrowserController
 
@@ -1070,45 +1071,77 @@ class ClaudeAgent:
             'smallworldlabs.com',  # SWL
         ]
 
-        portal_urls = []
-        seen_hosts = set()
+        # Collect all candidate URLs per dedup key (host + path prefix)
+        candidates_by_key = {}  # dedup_key -> list of URLs
+
+        def _collect_url(page_url: str):
+            if BrowserController._is_salesforce_infrastructure_url(page_url):
+                return
+            if BrowserController._is_salesforce_file_download(page_url):
+                return
+            host = urlparse(page_url).netloc.lower()
+            if not any(ind in host for ind in portal_indicators):
+                return
+            path = urlparse(page_url).path.strip('/')
+            path_prefix = path.split('/')[0] if path else ''
+            dedup_key = f"{host}/{path_prefix}"
+            if dedup_key not in candidates_by_key:
+                candidates_by_key[dedup_key] = []
+            if page_url not in candidates_by_key[dedup_key]:
+                candidates_by_key[dedup_key].append(page_url)
 
         # Check exhibitor pages for portal domains
         for page_url in pre_scan_results.get('exhibitor_pages', []):
-            # Skip Salesforce infrastructure URLs
-            if BrowserController._is_salesforce_infrastructure_url(page_url):
-                continue
-            # Skip FileDownload URLs (these are PDFs, not portal pages)
-            if BrowserController._is_salesforce_file_download(page_url):
-                continue
-
-            host = urlparse(page_url).netloc.lower()
-            if any(ind in host for ind in portal_indicators):
-                # Deduplicate by host+path prefix to avoid scanning the same portal twice
-                # but allow different paths on same host (e.g. /mwcoem/s/Home vs /4yfnoem/s/Home)
-                path = urlparse(page_url).path.strip('/')
-                path_prefix = path.split('/')[0] if path else ''
-                dedup_key = f"{host}/{path_prefix}"
-                if dedup_key not in seen_hosts:
-                    seen_hosts.add(dedup_key)
-                    portal_urls.append(page_url)
+            _collect_url(page_url)
 
         # Also check web search results if stored
         for pdf in pre_scan_results.get('pdf_links', []):
             source = pdf.get('source_page', '')
             if source:
-                if BrowserController._is_salesforce_infrastructure_url(source):
-                    continue
-                if BrowserController._is_salesforce_file_download(source):
-                    continue
-                host = urlparse(source).netloc.lower()
-                if any(ind in host for ind in portal_indicators):
-                    path = urlparse(source).path.strip('/')
-                    path_prefix = path.split('/')[0] if path else ''
-                    dedup_key = f"{host}/{path_prefix}"
-                    if dedup_key not in seen_hosts:
-                        seen_hosts.add(dedup_key)
-                        portal_urls.append(source)
+                _collect_url(source)
+
+        # For each dedup key, pick the best entry point URL
+        # Prefer /s/Home over any other page
+        portal_urls = []
+        for dedup_key, urls in candidates_by_key.items():
+            best_url = urls[0]  # Default: first found
+            for url in urls:
+                parsed_path = urlparse(url).path.lower().rstrip('/')
+                if parsed_path.endswith('/s/home'):
+                    best_url = url
+                    break
+            portal_urls.append(best_url)
+
+        # Sort portals by relevance to fair name
+        # Portals whose path/host contains fair abbreviation come first
+        if fair_name:
+            clean_name = re.sub(r'\s*20\d{2}\s*', '', fair_name).strip().lower()
+            name_parts = clean_name.replace(' ', '').replace('-', '')
+            # Collect match terms: abbreviation letters + significant words
+            match_terms = set()
+            if name_parts:
+                match_terms.add(name_parts)
+            words = clean_name.split()
+            stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'fair', 'trade',
+                         'show', 'exhibition', 'messe'}
+            for w in words:
+                if w not in stop_words and not w.isdigit() and len(w) >= 2:
+                    match_terms.add(w)
+
+            def _relevance_score(url: str) -> int:
+                """Higher = more relevant to fair. Sort descending."""
+                lower_url = url.lower()
+                host = urlparse(url).netloc.lower()
+                path = urlparse(url).path.lower()
+                score = 0
+                for term in match_terms:
+                    if term in host:
+                        score += 10  # Strong: fair name in hostname
+                    if term in path:
+                        score += 5   # Good: fair name in path
+                return score
+
+            portal_urls.sort(key=_relevance_score, reverse=True)
 
         return portal_urls
 
@@ -1625,7 +1658,7 @@ class ClaudeAgent:
                 self._log("FASE 1.25: PORTAL DETECTIE & DEEP SCAN")
                 self._log("=" * 60)
                 portal_pages = []
-                portal_urls = self._find_portal_urls(pre_scan_results)
+                portal_urls = self._find_portal_urls(pre_scan_results, fair_name=input_data.fair_name)
                 self._log(f"Gevonden portal URLs: {len(portal_urls)}")
                 for purl in portal_urls:
                     self._log(f"  Portal: {purl}")

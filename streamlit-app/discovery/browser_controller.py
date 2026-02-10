@@ -191,6 +191,31 @@ class BrowserController:
         if '.my.salesforce.com' in host:
             return True
 
+        # Block OEM platform internal URLs (require authentication, not public content)
+        oem_paths = [
+            '/oemlogin',                    # OEM login page
+            '/secur/logout.jsp',            # Salesforce logout
+            '/oempageredirect',             # OEM internal redirect
+            '/oemprogressbar',              # OEM UI progress bar component
+            '/oemindex',                    # OEM search/index page
+            '/exhibitorstanddetailpage',    # Stand detail (requires auth)
+        ]
+        if any(p in path for p in oem_paths):
+            return True
+
+        # Block static resource URLs on force.com (JS, CSS, images)
+        if '.force.com' in host and '/resource/' in path:
+            return True
+
+        # Block image/media file URLs on portal domains
+        image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico', '.webp', '.bmp')
+        if any(path.endswith(ext) for ext in image_extensions):
+            # Only block on known portal domains (not on general websites)
+            portal_hosts = ['.my.site.com', '.force.com', '.salesforce.com',
+                           '.cvent.com', '.a2zinc.net', '.expocad.', '.smallworldlabs.com']
+            if any(ph in host for ph in portal_hosts):
+                return True
+
         return False
 
     @staticmethod
