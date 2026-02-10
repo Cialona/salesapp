@@ -3,34 +3,54 @@ Data Manager for Trade Fair Discovery
 Handles loading, saving, and managing fair data.
 """
 
+import fcntl
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-import streamlit as st
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
 # Data directory
 DATA_DIR = Path(__file__).parent / "data"
 FAIRS_FILE = DATA_DIR / "fairs.json"
+LOCK_FILE = DATA_DIR / ".fairs.lock"
+
+# In-process lock for thread safety (fcntl only protects across processes)
+_file_lock = threading.Lock()
 
 def ensure_data_dir():
     """Ensure data directory exists."""
     DATA_DIR.mkdir(exist_ok=True)
 
 def load_fairs() -> dict:
-    """Load all fairs from JSON file."""
+    """Load all fairs from JSON file (thread-safe with file lock)."""
     ensure_data_dir()
     if FAIRS_FILE.exists():
-        with open(FAIRS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        with _file_lock:
+            with open(FAIRS_FILE, 'r', encoding='utf-8') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared (read) lock
+                try:
+                    return json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     return {}
 
 def save_fairs(fairs: dict):
-    """Save all fairs to JSON file."""
+    """Save all fairs to JSON file (thread-safe with exclusive file lock)."""
     ensure_data_dir()
-    with open(FAIRS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(fairs, f, indent=2, ensure_ascii=False)
+    with _file_lock:
+        with open(FAIRS_FILE, 'w', encoding='utf-8') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive (write) lock
+            try:
+                json.dump(fairs, f, indent=2, ensure_ascii=False)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def get_fair(fair_id: str) -> Optional[dict]:
     """Get a specific fair by ID."""
@@ -38,18 +58,49 @@ def get_fair(fair_id: str) -> Optional[dict]:
     return fairs.get(fair_id)
 
 def save_fair(fair_id: str, fair_data: dict):
-    """Save or update a specific fair."""
-    fairs = load_fairs()
+    """Save or update a specific fair (atomic read-modify-write)."""
+    ensure_data_dir()
     fair_data['updated_at'] = datetime.now().isoformat()
-    fairs[fair_id] = fair_data
-    save_fairs(fairs)
+    with _file_lock:
+        # Read under lock
+        fairs = {}
+        if FAIRS_FILE.exists():
+            with open(FAIRS_FILE, 'r', encoding='utf-8') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    fairs = json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        # Modify
+        fairs[fair_id] = fair_data
+        # Write under lock
+        with open(FAIRS_FILE, 'w', encoding='utf-8') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(fairs, f, indent=2, ensure_ascii=False)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def delete_fair(fair_id: str):
-    """Delete a fair."""
-    fairs = load_fairs()
-    if fair_id in fairs:
-        del fairs[fair_id]
-        save_fairs(fairs)
+    """Delete a fair (atomic read-modify-write)."""
+    ensure_data_dir()
+    with _file_lock:
+        fairs = {}
+        if FAIRS_FILE.exists():
+            with open(FAIRS_FILE, 'r', encoding='utf-8') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    fairs = json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        if fair_id in fairs:
+            del fairs[fair_id]
+            with open(FAIRS_FILE, 'w', encoding='utf-8') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    json.dump(fairs, f, indent=2, ensure_ascii=False)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def create_fair_id(fair_name: str) -> str:
     """Create a URL-safe ID from fair name."""

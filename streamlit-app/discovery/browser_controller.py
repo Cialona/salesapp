@@ -52,10 +52,13 @@ class ExtractedEmail:
 class BrowserController:
     """Controls a headless browser for Claude Computer Use."""
 
-    def __init__(self, width: int = 1024, height: int = 768):
+    def __init__(self, width: int = 1024, height: int = 768, download_dir_suffix: str = ""):
         self.width = width
         self.height = height
-        self.download_dir = Path.cwd() / '.cache' / 'downloads'
+        if download_dir_suffix:
+            self.download_dir = Path.cwd() / '.cache' / 'downloads' / download_dir_suffix
+        else:
+            self.download_dir = Path.cwd() / '.cache' / 'downloads'
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
         self._playwright = None

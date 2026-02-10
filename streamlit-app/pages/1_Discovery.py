@@ -1,11 +1,10 @@
 """
 Cialona Trade Fair Discovery - Discovery Page
-Simple interface to start discoveries directly in the app.
+Supports multiple concurrent discoveries with live progress tracking.
 """
 
 import streamlit as st
 import json
-import asyncio
 import subprocess
 import sys
 import time as _time
@@ -13,13 +12,10 @@ from pathlib import Path
 from datetime import datetime
 import os
 
-import anthropic
-import socket
-from urllib.parse import urlparse
-
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import data_manager as dm
+import job_manager as jm
 from config import CUSTOM_CSS, CIALONA_ORANGE, CIALONA_NAVY, APP_ICON
 
 # Page configuration
@@ -44,7 +40,7 @@ def ensure_playwright_installed():
     except Exception as e:
         error_str = str(e)
         if "Executable doesn't exist" in error_str or "browserType.launch" in error_str:
-            st.info("🔧 Eerste keer setup: Playwright browsers installeren...")
+            st.info("Eerste keer setup: Playwright browsers installeren...")
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -64,84 +60,12 @@ def ensure_playwright_installed():
             return False
 
 
-def validate_url(url: str) -> bool:
-    """Check if a URL's domain resolves and is reachable."""
-    if not url:
-        return False
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        # Try DNS resolution
-        socket.gethostbyname(hostname)
-        return True
-    except (socket.gaierror, socket.herror, Exception):
-        return False
+# ── Track which jobs belong to this session ──────────────────────────────
+if 'my_job_ids' not in st.session_state:
+    st.session_state.my_job_ids = []
 
 
-def find_fair_website(api_key: str, fair_name: str, year: int, city: str = None, failed_url: str = None) -> dict:
-    """Use Claude to find the official website URL for a trade fair."""
-    client = anthropic.Anthropic(api_key=api_key)
-
-    error_context = ""
-    if failed_url:
-        error_context = f"""
-
-IMPORTANT: The previously suggested URL "{failed_url}" was INVALID (domain does not exist).
-Please double-check the exact spelling of the domain name and provide a CORRECT URL.
-Common mistakes: typos in domain names like "salonilemilano" instead of "salonemilano".
-"""
-
-    prompt = f"""Find the official website URL for this trade fair:{error_context}
-
-Trade Fair: {fair_name}
-Year: {year}
-{f'City: {city}' if city else ''}
-
-CRITICAL: Double-check the EXACT spelling of the domain name! Common trade fair websites:
-- Salone del Mobile: salonemilano.it (NOT salonilemilano)
-- Ambiente: ambiente.messefrankfurt.com
-- bauma: bauma.de
-- ISPO Munich: ispo.com
-
-Return ONLY a JSON object with these fields:
-- url: The official website URL (the exhibitor/aussteller section if possible). VERIFY SPELLING!
-- confidence: "high", "medium", or "low"
-- notes: Brief explanation
-
-Example response:
-{{"url": "https://www.bauma.de/en/trade-fair/exhibitors/", "confidence": "high", "notes": "Official bauma website, exhibitor section"}}
-
-If you cannot find a reliable URL, return:
-{{"url": null, "confidence": "low", "notes": "Could not find official website"}}
-
-Return ONLY the JSON, no other text."""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        response_text = response.content[0].text.strip()
-
-        # Try to parse JSON from response
-        # Handle cases where response might have markdown code blocks
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
-
-        result = json.loads(response_text)
-        return result
-
-    except Exception as e:
-        return {"url": None, "confidence": "low", "notes": f"Error: {str(e)}"}
-
-
-# Sidebar
+# ── Sidebar ──────────────────────────────────────────────────────────────
 with st.sidebar:
     logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
     if logo_path.exists():
@@ -156,80 +80,32 @@ with st.sidebar:
 
     st.markdown("---")
 
-    if st.button("🏠 Dashboard", use_container_width=True):
+    if st.button("Dashboard", use_container_width=True):
         st.switch_page("app.py")
 
-# Header
+
+# ── Header ───────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="main-header">
-    <h1>🔍 Nieuwe Discovery</h1>
-    <p class="tagline">Vind automatisch exhibitor documenten voor een beurs</p>
+    <h1>Nieuwe Discovery</h1>
+    <p class="tagline">Vind automatisch exhibitor documenten voor een of meerdere beurzen</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Simple form
-st.markdown("### Beurs Informatie")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    fair_name = st.text_input(
-        "Beurs Naam *",
-        placeholder="bijv. Ambiente, bauma, ISPO Munich"
-    )
-    fair_city = st.text_input(
-        "Stad",
-        placeholder="bijv. Frankfurt, München, Milaan"
-    )
-
-with col2:
-    # Year input - default to next year
-    current_year = datetime.now().year
-    fair_year = st.number_input(
-        "Jaar *",
-        min_value=2020,
-        max_value=2035,
-        value=current_year + 1,
-        step=1
-    )
-    fair_country = st.text_input(
-        "Land",
-        placeholder="bijv. Germany, Italy, Netherlands"
-    )
-
-# Client name for personalized email drafts
-st.markdown("### Klant Informatie (optioneel)")
-client_name = st.text_input(
-    "Klantnaam",
-    placeholder="bijv. ACME Corporation, Shell, Philips",
-    help="Als je een klantnaam invult, wordt deze gebruikt in de concept-email voor ontbrekende documenten"
-)
-
-st.markdown("---")
-
-# Info box
-st.info("""
-**Hoe werkt het?**
-1. Voer de beursnaam en het jaar in
-2. Klik op 'Start Discovery'
-3. De AI zoekt eerst de officiële website
-4. Daarna worden automatisch documenten gezocht (~2-3 minuten)
-""")
-
-# Check for API key
+# ── Check for API key ────────────────────────────────────────────────────
 api_key = os.environ.get('ANTHROPIC_API_KEY')
 if not api_key:
     try:
         api_key = st.secrets.get('ANTHROPIC_API_KEY')
-    except:
+    except Exception:
         pass
 
 if not api_key:
-    st.warning("⚠️ Anthropic API key niet geconfigureerd.")
+    st.warning("Anthropic API key niet geconfigureerd.")
     st.markdown("""
     **Hoe configureer je de API key?**
     1. Ga naar je app in Streamlit Cloud
-    2. Klik op "Manage app" (rechtsonder) → "Settings" → "Secrets"
+    2. Klik op "Manage app" (rechtsonder) > "Settings" > "Secrets"
     3. Voeg toe:
     ```
     ANTHROPIC_API_KEY = "sk-ant-..."
@@ -237,235 +113,245 @@ if not api_key:
     """)
     st.stop()
 
-# Start Discovery button
-if st.button("🚀 Start Discovery", type="primary", disabled=not fair_name, use_container_width=True):
-    if not fair_name:
-        st.error("Vul een beursnaam in")
-    else:
-        from discovery.claude_agent import ClaudeAgent
 
-        # ── Phase tracking state ─────────────────────────────────────
-        PHASES = ClaudeAgent.PHASES
-        phase_state = {
-            "current_id": "url_lookup",
-            "start_time": _time.time(),
-            "phase_start_time": _time.time(),
-            "phase_times": {},  # actual seconds per completed phase
-        }
+# ══════════════════════════════════════════════════════════════════════════
+# SECTION 1: Start New Discovery Form
+# ══════════════════════════════════════════════════════════════════════════
 
-        def _get_phase(phase_id):
-            for p in PHASES:
-                if p["id"] == phase_id:
-                    return p
-            return PHASES[0]
+st.markdown("### Beurs Informatie")
 
-        def _phase_index(phase_id):
-            for i, p in enumerate(PHASES):
-                if p["id"] == phase_id:
-                    return i
-            return 0
+col1, col2 = st.columns(2)
 
-        def _remaining_estimate():
-            """Estimate remaining seconds based on actual + estimated durations."""
-            cur_idx = _phase_index(phase_state["current_id"])
-            cur_phase = _get_phase(phase_state["current_id"])
-            # Time spent in current phase so far
-            in_phase = _time.time() - phase_state["phase_start_time"]
-            # Remaining of current phase (estimate minus elapsed, min 0)
-            cur_remaining = max(0, cur_phase["est_secs"] - in_phase)
-            # Sum estimated durations of future phases
-            future = sum(p["est_secs"] for p in PHASES[cur_idx + 1:])
-            return int(cur_remaining + future)
+with col1:
+    fair_name = st.text_input(
+        "Beurs Naam *",
+        placeholder="bijv. Ambiente, bauma, ISPO Munich",
+        key="new_fair_name",
+    )
+    fair_city = st.text_input(
+        "Stad",
+        placeholder="bijv. Frankfurt, Munchen, Milaan",
+        key="new_fair_city",
+    )
 
-        def _progress_pct():
-            """Calculate current progress % including interpolation within phase."""
-            cur_phase = _get_phase(phase_state["current_id"])
-            in_phase = _time.time() - phase_state["phase_start_time"]
-            ratio = min(1.0, in_phase / max(1, cur_phase["est_secs"]))
-            pct = cur_phase["pct_start"] + ratio * (cur_phase["pct_end"] - cur_phase["pct_start"])
-            return min(int(pct), 99)
+with col2:
+    current_year = datetime.now().year
+    fair_year = st.number_input(
+        "Jaar *",
+        min_value=2020,
+        max_value=2035,
+        value=current_year + 1,
+        step=1,
+        key="new_fair_year",
+    )
+    fair_country = st.text_input(
+        "Land",
+        placeholder="bijv. Germany, Italy, Netherlands",
+        key="new_fair_country",
+    )
 
-        # ── UI elements ──────────────────────────────────────────────
-        progress_container = st.container()
-        with progress_container:
-            st.markdown("### Discovery bezig...")
-            progress_bar = st.progress(0)
-            phase_cols = st.columns(len(PHASES))
-            phase_labels = []
-            for i, (col, phase) in enumerate(zip(phase_cols, PHASES)):
-                with col:
-                    lbl = st.empty()
-                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:#9CA3AF;
-                        padding:0.25rem 0;">{phase['label']}</div>""", unsafe_allow_html=True)
-                    phase_labels.append(lbl)
-            time_display = st.empty()
-            status_text = st.empty()
-            log_expander = st.expander("Voortgang details", expanded=False)
-            with log_expander:
-                log_container = st.empty()
-                logs = []
+# Client name (optional)
+client_name = st.text_input(
+    "Klantnaam (optioneel)",
+    placeholder="bijv. ACME Corporation, Shell, Philips",
+    help="Wordt gebruikt in de concept-email voor ontbrekende documenten",
+    key="new_client_name",
+)
 
-        def _render_phase_labels():
-            cur_idx = _phase_index(phase_state["current_id"])
-            for i, (lbl, phase) in enumerate(zip(phase_labels, PHASES)):
-                if i < cur_idx:
-                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:#10B981;
-                        font-weight:600;padding:0.25rem 0;">✓ {phase['label']}</div>""",
-                        unsafe_allow_html=True)
-                elif i == cur_idx:
-                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:{CIALONA_ORANGE};
-                        font-weight:600;padding:0.25rem 0;">● {phase['label']}</div>""",
-                        unsafe_allow_html=True)
-                else:
-                    lbl.markdown(f"""<div style="text-align:center;font-size:0.75rem;color:#9CA3AF;
-                        padding:0.25rem 0;">{phase['label']}</div>""",
-                        unsafe_allow_html=True)
+# Active jobs count
+active_jobs = jm.get_active_jobs()
+active_count = len(active_jobs)
 
-        def _update_time():
-            remaining = _remaining_estimate()
-            mins, secs = divmod(remaining, 60)
-            elapsed = int(_time.time() - phase_state["start_time"])
-            e_mins, e_secs = divmod(elapsed, 60)
-            time_display.markdown(f"""<div style="text-align:center;color:#6B7280;font-size:0.9rem;
-                margin:0.5rem 0;">Geschatte resterende tijd: <strong>{mins}:{secs:02d}</strong>
-                &nbsp;·&nbsp; Verstreken: {e_mins}:{e_secs:02d}</div>""",
-                unsafe_allow_html=True)
+# Start button
+col_start, col_info = st.columns([2, 3])
+with col_start:
+    can_start = bool(fair_name)
+    start_label = "Start Discovery"
+    if active_count > 0:
+        start_label = f"Start Discovery (+{active_count} actief)"
 
-        def on_phase_change(new_phase_id):
-            """Called by ClaudeAgent when a phase transitions."""
-            old_id = phase_state["current_id"]
-            now = _time.time()
-            phase_state["phase_times"][old_id] = now - phase_state["phase_start_time"]
-            phase_state["current_id"] = new_phase_id
-            phase_state["phase_start_time"] = now
-            progress_bar.progress(_progress_pct())
-            _render_phase_labels()
-            _update_time()
-
-        def update_logs(msg):
-            """Update the log display and refresh progress."""
-            logs.append(msg)
-            log_container.code("\n".join(logs[-25:]))
-            # Update progress interpolation on every log tick
-            progress_bar.progress(_progress_pct())
-            _update_time()
-
-        # ── Initial render ───────────────────────────────────────────
-        _render_phase_labels()
-        _update_time()
-
-        # Step 1: Find the official website URL
-        update_logs(f"Zoeken naar officiële website voor: {fair_name} {fair_year}")
-        status_text.text("Officiële website zoeken...")
-
-        fair_url = None
-        max_url_attempts = 3
-        failed_url = None
-
-        for attempt in range(max_url_attempts):
-            website_result = find_fair_website(api_key, fair_name, fair_year, fair_city, failed_url=failed_url)
-            candidate_url = website_result.get("url")
-            confidence = website_result.get("confidence", "low")
-            notes = website_result.get("notes", "")
-
-            if candidate_url:
-                update_logs(f"URL gevonden: {candidate_url}")
-                update_logs(f"   Zekerheid: {confidence} - {notes}")
-
-                status_text.text("URL valideren...")
-                if validate_url(candidate_url):
-                    update_logs(f"URL gevalideerd!")
-                    fair_url = candidate_url
-                    break
-                else:
-                    update_logs(f"URL ongeldig (domein bestaat niet), opnieuw zoeken...")
-                    failed_url = candidate_url
-            else:
-                update_logs(f"Geen URL gevonden: {notes}")
-                break
-
-        if not fair_url:
-            update_logs(f"Geen geldige website gevonden, agent zal zelf zoeken...")
-
-        # Step 2: Check Playwright
-        status_text.text("Browser controleren...")
+    if st.button(start_label, type="primary", disabled=not can_start, use_container_width=True):
+        # Check Playwright once
         if not ensure_playwright_installed():
             st.error("Browser kon niet worden gestart. Probeer het later opnieuw.")
-            st.stop()
-
-        async def run_discovery_async():
-            """Run the discovery asynchronously."""
-            from discovery.schemas import TestCaseInput, output_to_dict
-
-            if fair_url:
-                update_logs(f"Start URL: {fair_url}")
-            else:
-                update_logs(f"Agent zal zelf zoeken naar de website")
-
-            status_text.text("AI agent wordt gestart...")
-
-            input_data = TestCaseInput(
-                fair_name=f"{fair_name} {fair_year}",
-                known_url=fair_url,
-                city=fair_city if fair_city else None,
-                country=fair_country if fair_country else None,
-                client_name=client_name if client_name else None
-            )
-
-            agent = ClaudeAgent(
+        else:
+            job_id = jm.start_discovery(
+                fair_name=fair_name,
+                fair_year=int(fair_year),
+                fair_city=fair_city or "",
+                fair_country=fair_country or "",
+                client_name=client_name or "",
                 api_key=api_key,
-                max_iterations=40,
-                debug=True,
-                on_status=update_logs,
-                on_phase=on_phase_change
             )
+            st.session_state.my_job_ids.append(job_id)
+            st.rerun()
 
-            status_text.text("Website scannen...")
+with col_info:
+    st.info(
+        "**Tip:** Je kunt meerdere beurzen tegelijk starten. "
+        "Vul een nieuwe beurs in en klik opnieuw op Start Discovery."
+    )
 
-            output = await agent.run(input_data)
-            return output_to_dict(output)
 
-        try:
-            result = asyncio.run(run_discovery_async())
+# ══════════════════════════════════════════════════════════════════════════
+# SECTION 2: Active & Recent Discoveries
+# ══════════════════════════════════════════════════════════════════════════
 
-            progress_bar.progress(100)
-            phase_state["current_id"] = "results"
-            _render_phase_labels()
-            elapsed = int(_time.time() - phase_state["start_time"])
-            e_mins, e_secs = divmod(elapsed, 60)
-            time_display.markdown(f"""<div style="text-align:center;color:#10B981;font-size:0.9rem;
-                margin:0.5rem 0;font-weight:600;">Voltooid in {e_mins}:{e_secs:02d}</div>""",
-                unsafe_allow_html=True)
-            status_text.text("Discovery voltooid!")
+# Collect all jobs for this session
+my_jobs = [jm.get_job(jid) for jid in st.session_state.my_job_ids if jm.get_job(jid)]
 
-            result['year'] = fair_year
-            fair_id = dm.import_discovery_result(result)
+# Split into active and finished
+active = [j for j in my_jobs if j.status in ("pending", "running")]
+finished = [j for j in my_jobs if j.status in ("completed", "failed")]
 
-            # Save to session state so buttons work after rerun
-            st.session_state['last_discovery_fair_id'] = fair_id
+# ── Active discoveries ───────────────────────────────────────────────────
+if active:
+    st.markdown("---")
+    st.markdown(f"### Actieve Discoveries ({len(active)})")
 
-            update_logs("Discovery succesvol afgerond!")
+    for job in active:
+        progress = jm.calc_progress(job)
+        remaining = jm.calc_remaining(job)
+        r_mins, r_secs = divmod(remaining, 60)
+        elapsed = int(_time.time() - job.start_time) if job.start_time else 0
+        e_mins, e_secs = divmod(elapsed, 60)
 
-            fair = dm.get_fair(fair_id)
-            if fair:
-                completeness = fair.get('completeness', {})
-                st.success(f"""
-                **Discovery voltooid voor {fair_name} {fair_year}!**
+        cur_phase = jm._get_phase(job.current_phase)
+        cur_idx = jm._phase_index(job.current_phase)
 
-                Documenten gevonden: **{completeness.get('found', 0)}/{completeness.get('total', 5)}**
-                """)
+        with st.container():
+            # Job header
+            st.markdown(f"""
+            <div style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
+                        border: 2px solid {CIALONA_ORANGE}; box-shadow: 0 2px 8px rgba(247,147,30,0.15);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                    <div>
+                        <strong style="font-size: 1.1rem; color: {CIALONA_NAVY};">
+                            {job.fair_name} {job.fair_year}
+                        </strong>
+                        <span style="background: {CIALONA_ORANGE}; color: white; padding: 0.15rem 0.6rem;
+                              border-radius: 9999px; font-size: 0.75rem; margin-left: 0.5rem;">
+                            {cur_phase['label']}
+                        </span>
+                    </div>
+                    <div style="color: #6B7280; font-size: 0.85rem;">
+                        ~{r_mins}:{r_secs:02d} resterend &middot; {e_mins}:{e_secs:02d} verstreken
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        except Exception as e:
-            error_msg = str(e)
-            update_logs(f"Fout: {error_msg}")
-            st.error(f"Er ging iets mis: {error_msg}")
+            # Progress bar
+            st.progress(progress)
 
-            import traceback
-            with st.expander("Technische details"):
-                st.code(traceback.format_exc())
+            # Phase indicators
+            phase_cols = st.columns(len(jm.PHASES))
+            for i, (col, phase) in enumerate(zip(phase_cols, jm.PHASES)):
+                with col:
+                    if i < cur_idx:
+                        col.markdown(f"""<div style="text-align:center;font-size:0.7rem;color:#10B981;
+                            font-weight:600;">✓ {phase['label']}</div>""", unsafe_allow_html=True)
+                    elif i == cur_idx:
+                        col.markdown(f"""<div style="text-align:center;font-size:0.7rem;color:{CIALONA_ORANGE};
+                            font-weight:600;">● {phase['label']}</div>""", unsafe_allow_html=True)
+                    else:
+                        col.markdown(f"""<div style="text-align:center;font-size:0.7rem;color:#9CA3AF;">
+                            {phase['label']}</div>""", unsafe_allow_html=True)
 
-# Navigation buttons — outside the discovery button block so they persist after rerun
-if 'last_discovery_fair_id' in st.session_state:
+            # Logs (collapsed)
+            with st.expander("Voortgang details", expanded=False):
+                if job.logs:
+                    st.code("\n".join(job.logs[-20:]))
+                else:
+                    st.write("Wachten op logs...")
+
+        st.markdown("")  # spacing
+
+    # Auto-refresh while jobs are active
+    _time.sleep(2)
+    st.rerun()
+
+# ── Finished discoveries ─────────────────────────────────────────────────
+if finished:
+    st.markdown("---")
+    st.markdown(f"### Afgeronde Discoveries ({len(finished)})")
+
+    for job in finished:
+        elapsed = int(job.end_time - job.start_time) if job.end_time and job.start_time else 0
+        e_mins, e_secs = divmod(elapsed, 60)
+
+        if job.status == "completed":
+            # Get result stats
+            fair_data = dm.get_fair(job.fair_id) if job.fair_id else None
+            found = 0
+            total = 5
+            if fair_data:
+                comp = fair_data.get('completeness', {})
+                found = comp.get('found', 0)
+                total = comp.get('total', 5)
+
+            st.markdown(f"""
+            <div style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
+                        border: 2px solid #10B981; box-shadow: 0 2px 8px rgba(16,185,129,0.1);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong style="font-size: 1.1rem; color: {CIALONA_NAVY};">
+                            {job.fair_name} {job.fair_year}
+                        </strong>
+                        <span style="background: #D1FAE5; color: #065F46; padding: 0.15rem 0.6rem;
+                              border-radius: 9999px; font-size: 0.75rem; margin-left: 0.5rem;">
+                            Voltooid
+                        </span>
+                    </div>
+                    <div style="color: #6B7280; font-size: 0.85rem;">
+                        {found}/{total} documenten &middot; {e_mins}:{e_secs:02d}
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_a, col_b, col_c = st.columns([1, 1, 2])
+            with col_a:
+                if st.button("Bekijk Details", key=f"detail_{job.job_id}", use_container_width=True):
+                    st.session_state['selected_fair'] = job.fair_id
+                    st.switch_page("pages/2_Fair_Details.py")
+            with col_b:
+                if found < total:
+                    if st.button("Email Sturen", key=f"email_{job.job_id}", use_container_width=True):
+                        st.session_state['selected_fair'] = job.fair_id
+                        st.switch_page("pages/3_Email_Generator.py")
+
+        else:
+            # Failed job
+            st.markdown(f"""
+            <div style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
+                        border: 2px solid #EF4444; box-shadow: 0 2px 8px rgba(239,68,68,0.1);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong style="font-size: 1.1rem; color: {CIALONA_NAVY};">
+                            {job.fair_name} {job.fair_year}
+                        </strong>
+                        <span style="background: #FEE2E2; color: #991B1B; padding: 0.15rem 0.6rem;
+                              border-radius: 9999px; font-size: 0.75rem; margin-left: 0.5rem;">
+                            Mislukt
+                        </span>
+                    </div>
+                    <div style="color: #6B7280; font-size: 0.85rem;">
+                        {e_mins}:{e_secs:02d}
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander("Foutdetails"):
+                st.error(job.error or "Onbekende fout")
+                if job.logs:
+                    st.code("\n".join(job.logs[-20:]))
+
+        st.markdown("")  # spacing
+
+# ── Legacy nav buttons for single-discovery flow ─────────────────────────
+if not finished and 'last_discovery_fair_id' in st.session_state:
     _nav_fair_id = st.session_state['last_discovery_fair_id']
     col_nav1, col_nav2 = st.columns(2)
     with col_nav1:
@@ -478,8 +364,8 @@ if 'last_discovery_fair_id' in st.session_state:
 
 st.markdown("---")
 
-# Alternative: JSON Import (collapsible, for advanced users)
-with st.expander("📥 JSON Importeren (voor beheerders)"):
+# ── JSON Import (advanced) ───────────────────────────────────────────────
+with st.expander("JSON Importeren (voor beheerders)"):
     st.markdown("Heb je al een discovery resultaat? Plak de JSON hier.")
 
     json_input = st.text_area(
@@ -494,7 +380,7 @@ with st.expander("📥 JSON Importeren (voor beheerders)"):
         json_input = uploaded_file.read().decode('utf-8')
         st.success(f"Bestand geladen: {uploaded_file.name}")
 
-    if st.button("📥 Importeren", disabled=not json_input):
+    if st.button("Importeren", disabled=not json_input, key="import_json"):
         try:
             discovery_data = json.loads(json_input)
 
@@ -502,9 +388,9 @@ with st.expander("📥 JSON Importeren (voor beheerders)"):
                 st.error("JSON moet een 'fair_name' veld bevatten")
             else:
                 fair_id = dm.import_discovery_result(discovery_data)
-                st.success(f"✅ Beurs '{discovery_data['fair_name']}' geïmporteerd!")
+                st.success(f"Beurs '{discovery_data['fair_name']}' geimporteerd!")
 
-                if st.button("Bekijk Details"):
+                if st.button("Bekijk Details", key="import_detail"):
                     st.session_state['selected_fair'] = fair_id
                     st.switch_page("pages/2_Fair_Details.py")
 
