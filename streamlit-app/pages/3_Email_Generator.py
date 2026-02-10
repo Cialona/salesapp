@@ -117,10 +117,13 @@ st.markdown("### ✉️ Email Configuratie")
 col_config1, col_config2 = st.columns(2)
 
 with col_config1:
-    # Contact email (saved per fair)
+    # Contact email — default to recommended email from discovery if not manually set
+    discovery_output = fair.get('discovery_output', {})
+    recommended = discovery_output.get('contact_info', {}).get('recommended_email', '')
+    default_email = fair.get('contact_email', '') or recommended
     contact_email = st.text_input(
         "Email Organisatie *",
-        value=fair.get('contact_email', ''),
+        value=default_email,
         placeholder="exhibitor@messefrankfurt.com"
     )
 
