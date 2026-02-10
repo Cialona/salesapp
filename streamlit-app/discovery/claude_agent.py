@@ -1211,6 +1211,13 @@ class ClaudeAgent:
                         score += 10  # Strong: fair name in hostname
                     if term in path:
                         score += 5   # Good: fair name in path
+                # OEM portals (e.g., mwcoem, provadaoem) typically contain the richest
+                # content: rules, schedules, manuals. Prioritize them.
+                if 'oem' in path:
+                    score += 8
+                # Salesforce community portals with /s/ paths are interactive portals
+                if '/s/' in path and 'my.site.com' in host:
+                    score += 3
                 return score
 
             portal_urls.sort(key=_relevance_score, reverse=True)
@@ -1256,7 +1263,7 @@ class ClaudeAgent:
         try:
             await scan_browser.launch()
 
-            for portal_url in portal_urls[:3]:  # Max 3 portals
+            for portal_url in portal_urls[:5]:  # Max 5 portals (OEM portals need priority)
                 try:
                     self._log(f"  🌐 Scanning portal: {portal_url}")
                     await scan_browser.goto(portal_url)
@@ -1365,6 +1372,71 @@ class ClaudeAgent:
                         except Exception as e:
                             self._log(f"    ⚠️ Could not scan sub-page: {link.url[:50]}: {e}")
                             continue
+
+                    # After regular link scanning, try common schedule sub-page URL patterns.
+                    # Salesforce SPAs and other portals often have schedule pages that aren't
+                    # discoverable through standard link extraction (dynamic navigation, tabs, etc.)
+                    schedule_already_found = any(
+                        p.get('detected_type') == 'schedule' and p.get('text_content')
+                        for p in portal_pages
+                    )
+                    if not schedule_already_found and 'my.site.com' in portal_domain:
+                        # Extract portal base path (e.g., /mwcoem/s from /mwcoem/s/Home)
+                        parsed_portal = urlparse(portal_url)
+                        path_parts = parsed_portal.path.strip('/').split('/')
+                        # For Salesforce: /{community}/s/... pattern
+                        portal_base = None
+                        for i, part in enumerate(path_parts):
+                            if part == 's' and i > 0:
+                                portal_base = f"{parsed_portal.scheme}://{portal_domain}/{'/'.join(path_parts[:i+1])}"
+                                break
+                        if not portal_base:
+                            portal_base = f"{parsed_portal.scheme}://{portal_domain}/{'/'.join(path_parts[:2])}" if len(path_parts) >= 2 else None
+
+                        if portal_base:
+                            schedule_slug_candidates = [
+                                'build-up-dismantling-schedule',
+                                'build-up-schedule',
+                                'build-up-dismantling',
+                                'schedule',
+                                'deadline',
+                                'deadlines',
+                                'access-policy',
+                                'event-schedule',
+                                'timetable',
+                                'set-up-dismantling',
+                                'setup-dismantling',
+                            ]
+                            self._log(f"    🔎 Probing {len(schedule_slug_candidates)} schedule URL patterns on portal...")
+                            for slug in schedule_slug_candidates:
+                                candidate_url = f"{portal_base}/{slug}"
+                                if candidate_url in visited:
+                                    continue
+                                visited.add(candidate_url)
+                                try:
+                                    await scan_browser.goto(candidate_url)
+                                    await asyncio.sleep(2)
+                                    page_text = await scan_browser.extract_page_text(max_chars=10000)
+                                    page_state = await scan_browser.get_state()
+
+                                    if not page_text or len(page_text) < 100:
+                                        continue
+
+                                    # Check if this isn't just the portal home (redirect on 404)
+                                    if page_state.url and page_state.url.rstrip('/') == portal_url.rstrip('/'):
+                                        continue
+
+                                    detected_type = self._detect_page_type(candidate_url, slug, page_text)
+                                    portal_pages.append({
+                                        'url': candidate_url,
+                                        'text_content': page_text,
+                                        'page_title': page_state.title or slug,
+                                        'detected_type': detected_type,
+                                    })
+                                    self._log(f"    📅 Found schedule page via URL probe: {candidate_url[:60]} ({len(page_text)} chars)")
+                                    break  # Found a schedule page, stop probing
+                                except Exception:
+                                    continue
 
                     self._log(f"  ✅ Portal scan complete: {sub_pages_scanned} sub-pages, {len([p for p in portal_pages if p.get('text_content')])} pages with content")
 
@@ -1618,13 +1690,33 @@ class ClaudeAgent:
             if word not in stop_words and len(word) >= 4:
                 fair_pdf_keywords.append(word)
 
-        # Launch a lightweight Playwright browser for searches
-        # (urllib GET requests to DuckDuckGo are blocked in some environments)
-        search_browser = BrowserController(800, 600)
+        # Launch a lightweight Playwright browser for searches with JS DISABLED.
+        # DuckDuckGo's html.duckduckgo.com/html/ is a no-JS endpoint that returns
+        # static HTML with result__a links. With JS enabled, DDG redirects to its
+        # JS-rendered version which has completely different HTML structure.
+        # We use direct Playwright API (not BrowserController) to set java_script_enabled=False.
+        from playwright.async_api import async_playwright as _async_pw
+        _pw = None
+        _search_browser = None
+        _search_page = None
         try:
-            await search_browser.launch()
+            _pw = await _async_pw().start()
+            _search_browser = await _pw.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            _search_context = await _search_browser.new_context(
+                viewport={'width': 800, 'height': 600},
+                java_script_enabled=False,
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            )
+            _search_page = await _search_context.new_page()
         except Exception as e:
             self._log(f"    ⚠️ Could not launch search browser: {e}")
+            if _search_browser:
+                await _search_browser.close()
+            if _pw:
+                await _pw.stop()
             return {'pdf_links': [], 'portal_urls': []}
 
         try:
@@ -1635,8 +1727,8 @@ class ClaudeAgent:
                     search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
                     try:
-                        await search_browser.goto(search_url)
-                        html = await search_browser._page.content()
+                        await _search_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
+                        html = await _search_page.content()
                     except Exception as e:
                         self._log(f"    Web search error: {e}")
                         continue
@@ -1645,13 +1737,19 @@ class ClaudeAgent:
                         continue
 
                     # Extract URLs from DuckDuckGo results
-                    # DDG returns results in result__a links, but href format varies:
+                    # DDG's no-JS HTML endpoint returns results in <a class="result__a"> links.
+                    # href format varies:
                     # - Direct URLs: href="https://example.com/..."
                     # - Redirect URLs: href="//duckduckgo.com/l/?uddg=https%3A%2F%2F..."
                     raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
                     if not raw_hrefs:
                         # Fallback: scan entire HTML for uddg= parameters
                         raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+                    if not raw_hrefs:
+                        # Second fallback: look for any <a> hrefs with uddg in them
+                        raw_hrefs = re.findall(r'href="([^"]*uddg=[^"]*)"', html)
+
+                    self._log(f"    DDG returned {len(raw_hrefs)} raw result links")
 
                     # Resolve each href to its actual URL
                     matches = []
@@ -1705,8 +1803,18 @@ class ClaudeAgent:
                 except Exception as e:
                     self._log(f"    Web search error: {e}")
                     continue
+
+                # Small delay between queries to avoid rate limiting
+                if qi < 3:
+                    await asyncio.sleep(1.5)
         finally:
-            await search_browser.close()
+            try:
+                if _search_browser:
+                    await _search_browser.close()
+                if _pw:
+                    await _pw.stop()
+            except Exception:
+                pass
 
         # Log search results summary
         if found_pdfs:
@@ -1909,10 +2017,17 @@ class ClaudeAgent:
 
                 # QUALITY GATE: Only skip agent when classifier says it's safe
                 # This requires 3+ documents with STRONG confidence (year+fair verified)
-                if classification_result.skip_agent_safe:
+                # ALSO: never skip if the schedule is completely missing — the browser
+                # agent is often needed to find schedule pages on OEM portals (Salesforce
+                # SPAs with dynamic navigation that the prescan's link extraction can miss)
+                schedule_found = classification_result.schedule and classification_result.schedule.confidence in ['strong', 'partial']
+                if classification_result.skip_agent_safe and schedule_found:
                     self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
                     skip_browser_agent = True
+                elif classification_result.skip_agent_safe and not schedule_found:
+                    self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
+                    self._log("   Maar schema ontbreekt — browser agent draait om schema te zoeken.")
                 else:
                     self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent draait voor extra validatie.")
@@ -1939,9 +2054,12 @@ class ClaudeAgent:
                             exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
                             portal_pages=[p for p in portal_pages if p.get('text_content')],
                         )
-                        if classification_result.skip_agent_safe:
+                        schedule_found_2 = classification_result.schedule and classification_result.schedule.confidence in ['strong', 'partial']
+                        if classification_result.skip_agent_safe and schedule_found_2:
                             self._log(f"🎉 KWALITEITSCHECK NA SECONDARY SCAN GESLAAGD!")
                             skip_browser_agent = True
+                        elif classification_result.skip_agent_safe and not schedule_found_2:
+                            self._log(f"⚠️ Secondary scan: kwaliteitscheck OK maar schema ontbreekt nog — agent draait")
 
             # Format pre-scan results for the agent
             if pre_scan_results['pdf_links']:
@@ -3031,9 +3149,9 @@ Kind regards,
             output.quality.rules = "strong"
             output.primary_reasoning.rules = f"PRE-SCAN GEVALIDEERD: {classification.rules.reason} (jaar: {classification.rules.year_verified}, beurs: {classification.rules.fair_verified})"
 
-        if classification.schedule and classification.schedule.confidence == 'strong':
+        if classification.schedule and classification.schedule.confidence in ['strong', 'partial']:
             output.documents.schedule_page_url = classification.schedule.url
-            output.quality.schedule = "strong"
+            output.quality.schedule = classification.schedule.confidence
             output.primary_reasoning.schedule = f"PRE-SCAN GEVALIDEERD: {classification.schedule.reason}"
 
         if classification.exhibitor_directory:
