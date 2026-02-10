@@ -389,8 +389,13 @@ class ClaudeAgent:
                 abbrev = ''.join(w[0] for w in significant_words if w)
                 abbreviations.append(abbrev)
 
-            # First word if it's a distinctive name (e.g., "PROVADA" -> "provada")
+            # Short all-caps names are already abbreviations (e.g., "MWC", "ISE", "CES", "IBC")
             non_numeric_words = [w for w in words if not w.isdigit()]
+            for w in non_numeric_words:
+                if len(w) >= 2 and len(w) <= 5 and name.split()[0].isupper():
+                    abbreviations.append(w)
+
+            # First word if it's a distinctive name (e.g., "PROVADA" -> "provada")
             if non_numeric_words:
                 first_word = non_numeric_words[0]
                 if len(first_word) >= 4:
@@ -667,7 +672,19 @@ class ClaudeAgent:
                     portal_urls_from_html = await pre_scan_browser.extract_external_portal_urls()
                     for portal_info in portal_urls_from_html:
                         portal_url = portal_info['url']
-                        if portal_url not in results['exhibitor_pages']:
+
+                        # FileDownload URLs are PDFs, not exhibitor pages
+                        if portal_info.get('is_file_download'):
+                            if portal_url not in [p['url'] for p in results['pdf_links']]:
+                                results['pdf_links'].append({
+                                    'url': portal_url,
+                                    'text': f"Portal file: {portal_url.split('file=')[-1][:20] if 'file=' in portal_url else ''}",
+                                    'type': 'unknown',
+                                    'year': None,
+                                    'source_page': url
+                                })
+                                self._log(f"    📄 Portal file download: {portal_url[:70]}")
+                        elif portal_url not in results['exhibitor_pages']:
                             results['exhibitor_pages'].insert(0, portal_url)
                             if portal_url not in [u for u in found_pages_to_scan]:
                                 found_pages_to_scan.append(portal_url)
@@ -926,7 +943,19 @@ class ClaudeAgent:
                     portal_urls_from_html = await pre_scan_browser.extract_external_portal_urls()
                     for portal_info in portal_urls_from_html:
                         portal_url = portal_info['url']
-                        if portal_url not in results['exhibitor_pages']:
+
+                        # FileDownload URLs are PDFs, not exhibitor pages
+                        if portal_info.get('is_file_download'):
+                            if portal_url not in [p['url'] for p in results['pdf_links']]:
+                                results['pdf_links'].append({
+                                    'url': portal_url,
+                                    'text': f"Portal file: {portal_url.split('file=')[-1][:20] if 'file=' in portal_url else ''}",
+                                    'type': 'unknown',
+                                    'year': None,
+                                    'source_page': url
+                                })
+                                self._log(f"    📄 Portal file download (2nd pass): {portal_url[:70]}")
+                        elif portal_url not in results['exhibitor_pages']:
                             results['exhibitor_pages'].insert(0, portal_url)
                             self._log(f"    🔗 Portal URL in HTML source (2nd pass): {portal_url[:70]}")
 
@@ -1010,33 +1039,59 @@ class ClaudeAgent:
         Find external portal URLs from prescan results.
         These are URLs on external platforms (Salesforce, OEM portals, etc.)
         that likely contain exhibitor information as web pages.
+
+        Filters out Salesforce infrastructure URLs and FileDownload links.
+        Prioritizes actual portal content pages (*/s/Home, */s/...).
         """
+        from .browser_controller import BrowserController
+
         portal_indicators = [
-            'my.site.com', 'force.com', 'salesforce.com',  # Salesforce
-            'cvent.com',  # Cvent
-            'a2zinc.net',  # A2Z
-            'expocad.',  # ExpoCad
+            'my.site.com',         # Salesforce community
+            'cvent.com',           # Cvent
+            'a2zinc.net',          # A2Z
+            'expocad.',            # ExpoCad
             'smallworldlabs.com',  # SWL
         ]
 
         portal_urls = []
-        seen = set()
+        seen_hosts = set()
 
         # Check exhibitor pages for portal domains
         for page_url in pre_scan_results.get('exhibitor_pages', []):
+            # Skip Salesforce infrastructure URLs
+            if BrowserController._is_salesforce_infrastructure_url(page_url):
+                continue
+            # Skip FileDownload URLs (these are PDFs, not portal pages)
+            if BrowserController._is_salesforce_file_download(page_url):
+                continue
+
             host = urlparse(page_url).netloc.lower()
-            if any(ind in host for ind in portal_indicators) and host not in seen:
-                seen.add(host)
-                portal_urls.append(page_url)
+            if any(ind in host for ind in portal_indicators):
+                # Deduplicate by host+path prefix to avoid scanning the same portal twice
+                # but allow different paths on same host (e.g. /mwcoem/s/Home vs /4yfnoem/s/Home)
+                path = urlparse(page_url).path.strip('/')
+                path_prefix = path.split('/')[0] if path else ''
+                dedup_key = f"{host}/{path_prefix}"
+                if dedup_key not in seen_hosts:
+                    seen_hosts.add(dedup_key)
+                    portal_urls.append(page_url)
 
         # Also check web search results if stored
         for pdf in pre_scan_results.get('pdf_links', []):
             source = pdf.get('source_page', '')
             if source:
+                if BrowserController._is_salesforce_infrastructure_url(source):
+                    continue
+                if BrowserController._is_salesforce_file_download(source):
+                    continue
                 host = urlparse(source).netloc.lower()
-                if any(ind in host for ind in portal_indicators) and host not in seen:
-                    seen.add(host)
-                    portal_urls.append(source)
+                if any(ind in host for ind in portal_indicators):
+                    path = urlparse(source).path.strip('/')
+                    path_prefix = path.split('/')[0] if path else ''
+                    dedup_key = f"{host}/{path_prefix}"
+                    if dedup_key not in seen_hosts:
+                        seen_hosts.add(dedup_key)
+                        portal_urls.append(source)
 
         return portal_urls
 
@@ -1457,12 +1512,34 @@ class ClaudeAgent:
         # Generate candidate portal URLs based on common patterns
         candidates = []
 
-        # Salesforce community patterns: {org}.my.site.com/{fair}oem/s/Home
-        for org in [org_name, name_parts]:
-            if len(org) >= 2:
-                candidates.append(f"https://{org}.my.site.com/{org}oem/s/Home")
-                candidates.append(f"https://{org}.my.site.com/s/Home")
-                candidates.append(f"https://{org}.my.site.com/")
+        # Collect org name variants to try
+        org_variants = set()
+        if len(org_name) >= 2:
+            org_variants.add(org_name)
+        if len(name_parts) >= 2:
+            org_variants.add(name_parts)
+
+        # Also try individual significant words from the fair name
+        # This catches cases like "Fruit Logistica" -> "fruitlogistica" and "logistica"
+        name_words = re.sub(r'\s*20\d{2}\s*', '', fair_name).strip().lower().split()
+        stop_words = {'the', 'of', 'and', 'for', 'in', 'at', 'de', 'der', 'die', 'das',
+                     'fair', 'trade', 'show', 'exhibition', 'messe', 'fiera', 'salon', 'salone'}
+        for word in name_words:
+            if word not in stop_words and not word.isdigit() and len(word) >= 3:
+                org_variants.add(word)
+
+        # Salesforce community patterns for each org variant
+        for org in org_variants:
+            # Pattern: {org}.my.site.com/{org}oem/s/Home (most common for trade fairs)
+            candidates.append(f"https://{org}.my.site.com/{org}oem/s/Home")
+            candidates.append(f"https://{org}.my.site.com/s/Home")
+            candidates.append(f"https://{org}.my.site.com/")
+
+            # Cross-pattern: try fair name as community prefix on different org hosts
+            # E.g., for MWC at mwcbarcelona.com: try {org}.my.site.com/{name}oem/s/Home
+            for name_variant in org_variants:
+                if name_variant != org:
+                    candidates.append(f"https://{org}.my.site.com/{name_variant}oem/s/Home")
 
         # Deduplicate
         seen = set()
@@ -1474,7 +1551,7 @@ class ClaudeAgent:
 
         # Probe each candidate
         found = []
-        for url in unique_candidates[:6]:  # Max 6 probes to keep it fast
+        for url in unique_candidates[:10]:  # Max 10 probes
             try:
                 req = urllib.request.Request(url, method='HEAD')
                 req.add_header('User-Agent', 'Mozilla/5.0 (compatible; TradeFairBot/1.0)')

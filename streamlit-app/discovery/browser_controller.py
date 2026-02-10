@@ -141,12 +141,90 @@ class BrowserController:
         except Exception:
             return ""
 
+    @staticmethod
+    def _is_salesforce_infrastructure_url(url: str) -> bool:
+        """
+        Check if a URL is a Salesforce infrastructure/platform URL (not actual portal content).
+        These are internal Salesforce services like login, SAML, payments, CDN, etc.
+        that should be filtered out from portal detection.
+        """
+        lower = url.lower()
+        host = urlparse(url).netloc.lower()
+        path = urlparse(url).path.lower()
+
+        # Block known Salesforce infrastructure hosts
+        infra_hosts = [
+            'login.salesforce.com',
+            'c.salesforce.com',
+            'payments.salesforce.com',
+            'service.force.com',
+            'location.force.com',
+            'sfdc-link-preview.',
+        ]
+        if any(h in host for h in infra_hosts):
+            return True
+
+        # Block known Salesforce infrastructure subdomains
+        infra_patterns = [
+            '.secure.force.com',    # SCORM, trial apps, etc.
+            '.file.force.com',      # File serving (requires login)
+            'sfdc-',                 # Salesforce internal CDN
+        ]
+        if any(p in host for p in infra_patterns):
+            return True
+
+        # Block infrastructure paths on any Salesforce domain
+        infra_paths = [
+            '/saml/', '/saml?',
+            '/login/', '/login?',
+            '/jslibrary/',
+            '/icons/',
+            '/brand-asset/',
+            '/embeddedservice/',
+            '/login-messages/',
+            '/sessionserver',
+        ]
+        if any(p in path for p in infra_paths):
+            return True
+
+        # Block *.my.salesforce.com (admin console, not community portal)
+        if '.my.salesforce.com' in host:
+            return True
+
+        return False
+
+    @staticmethod
+    def _is_salesforce_file_download(url: str) -> bool:
+        """Check if a URL is a Salesforce file download link (should be treated as PDF)."""
+        return 'servlet/servlet.FileDownload' in url or 'servlet.FileDownload' in url
+
+    @staticmethod
+    def _derive_portal_home_from_file_url(url: str) -> Optional[str]:
+        """
+        Derive the portal home URL from a Salesforce FileDownload URL.
+        E.g., https://gsma.my.site.com/mwcoem/servlet/servlet.FileDownload?file=X
+        -> https://gsma.my.site.com/mwcoem/s/Home
+        """
+        if 'my.site.com' not in url:
+            return None
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip('/').split('/')
+        # Path is like: mwcoem/servlet/servlet.FileDownload
+        # We want: mwcoem/s/Home
+        if len(path_parts) >= 1:
+            community_prefix = path_parts[0]  # e.g., "mwcoem"
+            return f"{parsed.scheme}://{parsed.netloc}/{community_prefix}/s/Home"
+        return None
+
     async def extract_external_portal_urls(self) -> List[Dict[str, str]]:
         """
         Extract external portal URLs from the page HTML source.
         Searches the raw HTML for URLs pointing to known portal platforms
         (Salesforce, Cvent, etc.) that may be hidden in JavaScript, data attributes,
         or dynamically rendered content.
+
+        Filters out Salesforce infrastructure URLs (login, SAML, payments, CDN).
+        Classifies FileDownload URLs separately for PDF treatment.
         """
         if not self._page:
             return []
@@ -168,14 +246,31 @@ class BrowserController:
 
             found = []
             seen = set()
+            derived_homes = set()
+
             for pattern in portal_patterns:
                 matches = re.findall(pattern, html)
                 for url in matches:
                     # Clean up the URL
                     url = url.rstrip('\\').rstrip(')').rstrip(';')
-                    if url not in seen:
-                        seen.add(url)
-                        found.append({'url': url, 'source': 'html_source'})
+                    if url in seen:
+                        continue
+                    seen.add(url)
+
+                    # Skip Salesforce infrastructure URLs
+                    if self._is_salesforce_infrastructure_url(url):
+                        continue
+
+                    # Classify FileDownload URLs specially
+                    if self._is_salesforce_file_download(url):
+                        found.append({'url': url, 'source': 'html_source', 'is_file_download': True})
+                        # Derive portal home from FileDownload URL
+                        home = self._derive_portal_home_from_file_url(url)
+                        if home and home not in derived_homes:
+                            derived_homes.add(home)
+                            found.append({'url': home, 'source': 'derived_from_file_download', 'is_file_download': False})
+                    else:
+                        found.append({'url': url, 'source': 'html_source', 'is_file_download': False})
 
             return found
         except Exception:
