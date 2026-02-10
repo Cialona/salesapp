@@ -122,6 +122,7 @@ class DebugInfo:
     blocked_urls: List[str] = field(default_factory=list)
     candidates: Candidates = field(default_factory=Candidates)
     notes: List[str] = field(default_factory=list)
+    discovery_log: List[str] = field(default_factory=list)  # Detailed step-by-step log
 
 
 @dataclass
@@ -221,6 +222,7 @@ def output_to_dict(output: DiscoveryOutput) -> Dict[str, Any]:
                 'exhibitor_directory': output.debug.candidates.exhibitor_directory,
             },
             'notes': output.debug.notes,
+            'discovery_log': output.debug.discovery_log,
         },
         'contact_info': {
             'emails': [

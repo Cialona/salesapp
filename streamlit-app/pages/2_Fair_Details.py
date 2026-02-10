@@ -302,8 +302,52 @@ with tab_raw:
 
     st.info("Dit is de volledige data zoals gevonden door de discovery agent.")
 
+    # Discovery Log download (detailed troubleshooting)
+    discovery_output = fair.get('discovery_output', {})
+    debug_info = discovery_output.get('debug', {})
+    discovery_log = debug_info.get('discovery_log', [])
+
+    if discovery_log:
+        st.markdown("#### 📋 Discovery Log (troubleshooting)")
+        st.caption(f"{len(discovery_log)} log entries beschikbaar")
+
+        # Build markdown log document
+        log_lines = [
+            f"# Discovery Log: {fair.get('name', 'Onbekend')}",
+            f"Datum: {fair.get('last_discovery', 'Onbekend')}",
+            f"Status: {fair.get('status', 'Onbekend')}",
+            "",
+            "---",
+            "",
+        ]
+        log_lines.extend(discovery_log)
+
+        log_text = "\n".join(log_lines)
+
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                label="📥 Download Discovery Log (.txt)",
+                data=log_text,
+                file_name=f"{fair_id}_discovery_log.txt",
+                mime="text/plain",
+                key="dl_log_txt"
+            )
+        with col_dl2:
+            st.download_button(
+                label="📥 Download Discovery Log (.md)",
+                data=log_text,
+                file_name=f"{fair_id}_discovery_log.md",
+                mime="text/markdown",
+                key="dl_log_md"
+            )
+
+        with st.expander("📋 Log bekijken", expanded=False):
+            st.code("\n".join(discovery_log), language=None)
+
+        st.markdown("---")
+
     # Show discovery output if available
-    discovery_output = fair.get('discovery_output')
     if discovery_output:
         st.json(discovery_output)
     else:
