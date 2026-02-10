@@ -1616,13 +1616,33 @@ class ClaudeAgent:
             if word not in stop_words and len(word) >= 4:
                 fair_pdf_keywords.append(word)
 
-        # Launch a lightweight Playwright browser for searches
-        # (urllib GET requests to DuckDuckGo are blocked in some environments)
-        search_browser = BrowserController(800, 600)
+        # Launch a lightweight Playwright browser for searches with JS DISABLED.
+        # DuckDuckGo's html.duckduckgo.com/html/ is a no-JS endpoint that returns
+        # static HTML with result__a links. With JS enabled, DDG redirects to its
+        # JS-rendered version which has completely different HTML structure.
+        # We use direct Playwright API (not BrowserController) to set java_script_enabled=False.
+        from playwright.async_api import async_playwright as _async_pw
+        _pw = None
+        _search_browser = None
+        _search_page = None
         try:
-            await search_browser.launch()
+            _pw = await _async_pw().start()
+            _search_browser = await _pw.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            _search_context = await _search_browser.new_context(
+                viewport={'width': 800, 'height': 600},
+                java_script_enabled=False,
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            )
+            _search_page = await _search_context.new_page()
         except Exception as e:
             self._log(f"    ⚠️ Could not launch search browser: {e}")
+            if _search_browser:
+                await _search_browser.close()
+            if _pw:
+                await _pw.stop()
             return {'pdf_links': [], 'portal_urls': []}
 
         try:
@@ -1633,8 +1653,8 @@ class ClaudeAgent:
                     search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
                     try:
-                        await search_browser.goto(search_url)
-                        html = await search_browser._page.content()
+                        await _search_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
+                        html = await _search_page.content()
                     except Exception as e:
                         self._log(f"    Web search error: {e}")
                         continue
@@ -1643,13 +1663,19 @@ class ClaudeAgent:
                         continue
 
                     # Extract URLs from DuckDuckGo results
-                    # DDG returns results in result__a links, but href format varies:
+                    # DDG's no-JS HTML endpoint returns results in <a class="result__a"> links.
+                    # href format varies:
                     # - Direct URLs: href="https://example.com/..."
                     # - Redirect URLs: href="//duckduckgo.com/l/?uddg=https%3A%2F%2F..."
                     raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
                     if not raw_hrefs:
                         # Fallback: scan entire HTML for uddg= parameters
                         raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+                    if not raw_hrefs:
+                        # Second fallback: look for any <a> hrefs with uddg in them
+                        raw_hrefs = re.findall(r'href="([^"]*uddg=[^"]*)"', html)
+
+                    self._log(f"    DDG returned {len(raw_hrefs)} raw result links")
 
                     # Resolve each href to its actual URL
                     matches = []
@@ -1703,8 +1729,18 @@ class ClaudeAgent:
                 except Exception as e:
                     self._log(f"    Web search error: {e}")
                     continue
+
+                # Small delay between queries to avoid rate limiting
+                if qi < 3:
+                    await asyncio.sleep(1.5)
         finally:
-            await search_browser.close()
+            try:
+                if _search_browser:
+                    await _search_browser.close()
+                if _pw:
+                    await _pw.stop()
+            except Exception:
+                pass
 
         # Log search results summary
         if found_pdfs:
