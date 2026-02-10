@@ -880,6 +880,17 @@ class ClaudeAgent:
                         if '.pdf' in lower_url:
                             continue
 
+                        # Skip individual exhibitor company pages (e.g., /exhibitors/34391-gsma)
+                        # These are company profiles, not document pages
+                        if re.search(r'/exhibitors?/\d+-', lower_url):
+                            continue
+
+                        # Skip fragment-only variations and login redirects
+                        if '#cookies' in lower_url or '#maincontent' in lower_url:
+                            continue
+                        if '/mymwc?' in lower_url or 'next=' in lower_url:
+                            continue
+
                         # Check if URL OR TEXT contains document keywords
                         # This catches links like "Technical regulations" -> /en/technical-regulations
                         url_has_keyword = any(kw in lower_url for kw in doc_keywords)
@@ -928,9 +939,15 @@ class ClaudeAgent:
                     if url in urls_to_scan[:20]:
                         continue
 
-                    # Skip listing pages
+                    # Skip listing pages, individual company profiles, fragments, and login redirects
                     lower_url = url.lower()
                     if '?pagenumber=' in lower_url or '?anno=' in lower_url or '?page=' in lower_url:
+                        continue
+                    if re.search(r'/exhibitors?/\d+-', lower_url):
+                        continue
+                    if '#cookies' in lower_url or '#maincontent' in lower_url:
+                        continue
+                    if '/mymwc?' in lower_url or 'next=' in lower_url:
                         continue
 
                     await pre_scan_browser.goto(url)
