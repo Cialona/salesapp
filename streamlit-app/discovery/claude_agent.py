@@ -1364,6 +1364,71 @@ class ClaudeAgent:
                             self._log(f"    ⚠️ Could not scan sub-page: {link.url[:50]}: {e}")
                             continue
 
+                    # After regular link scanning, try common schedule sub-page URL patterns.
+                    # Salesforce SPAs and other portals often have schedule pages that aren't
+                    # discoverable through standard link extraction (dynamic navigation, tabs, etc.)
+                    schedule_already_found = any(
+                        p.get('detected_type') == 'schedule' and p.get('text_content')
+                        for p in portal_pages
+                    )
+                    if not schedule_already_found and 'my.site.com' in portal_domain:
+                        # Extract portal base path (e.g., /mwcoem/s from /mwcoem/s/Home)
+                        parsed_portal = urlparse(portal_url)
+                        path_parts = parsed_portal.path.strip('/').split('/')
+                        # For Salesforce: /{community}/s/... pattern
+                        portal_base = None
+                        for i, part in enumerate(path_parts):
+                            if part == 's' and i > 0:
+                                portal_base = f"{parsed_portal.scheme}://{portal_domain}/{'/'.join(path_parts[:i+1])}"
+                                break
+                        if not portal_base:
+                            portal_base = f"{parsed_portal.scheme}://{portal_domain}/{'/'.join(path_parts[:2])}" if len(path_parts) >= 2 else None
+
+                        if portal_base:
+                            schedule_slug_candidates = [
+                                'build-up-dismantling-schedule',
+                                'build-up-schedule',
+                                'build-up-dismantling',
+                                'schedule',
+                                'deadline',
+                                'deadlines',
+                                'access-policy',
+                                'event-schedule',
+                                'timetable',
+                                'set-up-dismantling',
+                                'setup-dismantling',
+                            ]
+                            self._log(f"    🔎 Probing {len(schedule_slug_candidates)} schedule URL patterns on portal...")
+                            for slug in schedule_slug_candidates:
+                                candidate_url = f"{portal_base}/{slug}"
+                                if candidate_url in visited:
+                                    continue
+                                visited.add(candidate_url)
+                                try:
+                                    await scan_browser.goto(candidate_url)
+                                    await asyncio.sleep(2)
+                                    page_text = await scan_browser.extract_page_text(max_chars=10000)
+                                    page_state = await scan_browser.get_state()
+
+                                    if not page_text or len(page_text) < 100:
+                                        continue
+
+                                    # Check if this isn't just the portal home (redirect on 404)
+                                    if page_state.url and page_state.url.rstrip('/') == portal_url.rstrip('/'):
+                                        continue
+
+                                    detected_type = self._detect_page_type(candidate_url, slug, page_text)
+                                    portal_pages.append({
+                                        'url': candidate_url,
+                                        'text_content': page_text,
+                                        'page_title': page_state.title or slug,
+                                        'detected_type': detected_type,
+                                    })
+                                    self._log(f"    📅 Found schedule page via URL probe: {candidate_url[:60]} ({len(page_text)} chars)")
+                                    break  # Found a schedule page, stop probing
+                                except Exception:
+                                    continue
+
                     self._log(f"  ✅ Portal scan complete: {sub_pages_scanned} sub-pages, {len([p for p in portal_pages if p.get('text_content')])} pages with content")
 
                 except Exception as e:
@@ -1943,10 +2008,17 @@ class ClaudeAgent:
 
                 # QUALITY GATE: Only skip agent when classifier says it's safe
                 # This requires 3+ documents with STRONG confidence (year+fair verified)
-                if classification_result.skip_agent_safe:
+                # ALSO: never skip if the schedule is completely missing — the browser
+                # agent is often needed to find schedule pages on OEM portals (Salesforce
+                # SPAs with dynamic navigation that the prescan's link extraction can miss)
+                schedule_found = classification_result.schedule and classification_result.schedule.confidence in ['strong', 'partial']
+                if classification_result.skip_agent_safe and schedule_found:
                     self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
                     skip_browser_agent = True
+                elif classification_result.skip_agent_safe and not schedule_found:
+                    self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
+                    self._log("   Maar schema ontbreekt — browser agent draait om schema te zoeken.")
                 else:
                     self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent draait voor extra validatie.")
@@ -1973,9 +2045,12 @@ class ClaudeAgent:
                             exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
                             portal_pages=[p for p in portal_pages if p.get('text_content')],
                         )
-                        if classification_result.skip_agent_safe:
+                        schedule_found_2 = classification_result.schedule and classification_result.schedule.confidence in ['strong', 'partial']
+                        if classification_result.skip_agent_safe and schedule_found_2:
                             self._log(f"🎉 KWALITEITSCHECK NA SECONDARY SCAN GESLAAGD!")
                             skip_browser_agent = True
+                        elif classification_result.skip_agent_safe and not schedule_found_2:
+                            self._log(f"⚠️ Secondary scan: kwaliteitscheck OK maar schema ontbreekt nog — agent draait")
 
             # Format pre-scan results for the agent
             if pre_scan_results['pdf_links']:
@@ -3065,9 +3140,9 @@ Kind regards,
             output.quality.rules = "strong"
             output.primary_reasoning.rules = f"PRE-SCAN GEVALIDEERD: {classification.rules.reason} (jaar: {classification.rules.year_verified}, beurs: {classification.rules.fair_verified})"
 
-        if classification.schedule and classification.schedule.confidence == 'strong':
+        if classification.schedule and classification.schedule.confidence in ['strong', 'partial']:
             output.documents.schedule_page_url = classification.schedule.url
-            output.quality.schedule = "strong"
+            output.quality.schedule = classification.schedule.confidence
             output.primary_reasoning.schedule = f"PRE-SCAN GEVALIDEERD: {classification.schedule.reason}"
 
         if classification.exhibitor_directory:
