@@ -1203,11 +1203,15 @@ class ClaudeAgent:
                         main_title = (await scan_browser.get_state()).title
 
                     if main_text and len(main_text) > 100:
+                        # Detect type from URL/content instead of always assuming exhibitor_manual
+                        home_type = self._detect_page_type(portal_url, main_title or '', main_text)
+                        if home_type == 'unknown':
+                            home_type = 'exhibitor_manual'  # Default for portal home pages
                         portal_pages.append({
                             'url': portal_url,
                             'text_content': main_text,
                             'page_title': main_title,
-                            'detected_type': 'exhibitor_manual',  # Portal home = manual
+                            'detected_type': home_type,
                         })
                         self._log(f"    📝 Extracted portal home page: {len(main_text)} chars")
 
@@ -1323,7 +1327,7 @@ class ClaudeAgent:
         # Floor plan
         if any(kw in combined for kw in [
             'floor plan', 'floorplan', 'hall plan', 'site map', 'venue map',
-            'exhibition layout', 'hallenplan', 'plattegrond',
+            'exhibition layout', 'hallenplan', 'plattegrond', 'expocad',
         ]):
             return 'floorplan'
 
