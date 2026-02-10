@@ -4,6 +4,7 @@ View detailed information about a specific fair.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 from pathlib import Path
 import sys
 from datetime import datetime
@@ -15,6 +16,24 @@ from config import (
     CUSTOM_CSS, CIALONA_ORANGE, CIALONA_NAVY, APP_ICON,
     DOCUMENT_TYPES, get_doc_chip_html
 )
+
+
+def copy_button(text: str, label: str = "📋 Kopieer", btn_id: str = "copy", bg: str = "#0369A1"):
+    """Render an HTML/JS button that copies text to clipboard."""
+    import html as html_mod
+    safe_text = html_mod.escape(text).replace("'", "\\'").replace("\n", "\\n")
+    components.html(f"""
+    <button id="{btn_id}" onclick="
+        navigator.clipboard.writeText('{safe_text}').then(function() {{
+            document.getElementById('{btn_id}').innerText = '✅ Gekopieerd!';
+            setTimeout(function() {{ document.getElementById('{btn_id}').innerText = '{label}'; }}, 1500);
+        }});
+    " style="
+        background: {bg}; color: white; border: none; padding: 0.5rem 1rem;
+        border-radius: 6px; cursor: pointer; font-size: 0.9rem; width: 100%;
+    ">{label}</button>
+    """, height=42)
+
 
 # Page configuration
 st.set_page_config(
@@ -261,7 +280,7 @@ with tab_contact:
             </div>
             """, unsafe_allow_html=True)
         with col_rec_action:
-            st.link_button("✉️ Mail", f"mailto:{recommended_email}", use_container_width=True)
+            copy_button(recommended_email, "📋 Kopieer", btn_id="copy_rec", bg="#059669")
 
     # Show all other emails in a collapsible section
     if emails:
@@ -286,7 +305,7 @@ with tab_contact:
                     </div>
                     """, unsafe_allow_html=True)
                 with col_action:
-                    st.link_button("✉️ Mail", f"mailto:{email}", use_container_width=True, key=f"mail_{email}")
+                    copy_button(email, "📋 Kopieer", btn_id=f"copy_{email.replace('@','_').replace('.','_')}")
     elif not recommended_email:
         st.info("Geen emailadressen gevonden tijdens de discovery.")
 
