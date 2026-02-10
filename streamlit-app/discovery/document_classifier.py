@@ -504,11 +504,29 @@ class DocumentClassifier:
 
             existing = getattr(result, mapped_type, None)
             if classification.confidence == 'strong':
+                should_replace = True
                 if existing and existing.confidence == 'strong':
-                    self.log(f"  ⬆ Portal page [{mapped_type}]: overrides previous (was {existing.url[:50]}...)")
-                setattr(result, mapped_type, classification)
-                self.log(f"  ✓ Portal page [{mapped_type}]: STRONG ✓year={classification.year_verified} ✓fair={classification.fair_verified}")
-                self.log(f"    URL: {page_url[:70]}...")
+                    # Both STRONG: only override if new page is more comprehensive
+                    # Compare by: also_contains count > text length > keep existing
+                    new_cross_refs = len(classification.also_contains or [])
+                    old_cross_refs = len(existing.also_contains or [])
+                    new_text_len = len(classification.text_excerpt or '')
+                    old_text_len = len(existing.text_excerpt or '')
+
+                    if new_cross_refs > old_cross_refs:
+                        should_replace = True
+                        self.log(f"  ⬆ Portal page [{mapped_type}]: overrides (more comprehensive: {new_cross_refs} vs {old_cross_refs} cross-refs)")
+                    elif new_cross_refs == old_cross_refs and new_text_len > old_text_len:
+                        should_replace = True
+                        self.log(f"  ⬆ Portal page [{mapped_type}]: overrides (more content: {new_text_len} vs {old_text_len} chars)")
+                    else:
+                        should_replace = False
+                        self.log(f"  ≡ Portal page [{mapped_type}]: kept existing (more comprehensive)")
+
+                if should_replace:
+                    setattr(result, mapped_type, classification)
+                    self.log(f"  ✓ Portal page [{mapped_type}]: STRONG ✓year={classification.year_verified} ✓fair={classification.fair_verified}")
+                    self.log(f"    URL: {page_url[:70]}...")
             elif classification.confidence == 'partial' and not existing:
                 setattr(result, mapped_type, classification)
                 self.log(f"  ~ Portal page [{mapped_type}]: partial")
