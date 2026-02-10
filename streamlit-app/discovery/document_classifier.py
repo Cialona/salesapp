@@ -910,9 +910,11 @@ Antwoord ALLEEN met valide JSON."""
     async def _aggregate_extracted_info(self, result: ClassificationResult) -> None:
         """Aggregate extracted info from all classified documents."""
 
-        # Collect all schedules
+        # Collect all schedules (deduplicate by date+time)
         all_build_up = []
         all_tear_down = []
+        seen_build_up = set()
+        seen_tear_down = set()
         all_emails = []
         all_phones = []
         organization = None
@@ -922,10 +924,18 @@ Antwoord ALLEEN met valide JSON."""
             if not classification:
                 continue
 
-            # Aggregate schedules
+            # Aggregate schedules with deduplication
             if classification.extracted_schedule:
-                all_build_up.extend(classification.extracted_schedule.build_up)
-                all_tear_down.extend(classification.extracted_schedule.tear_down)
+                for entry in classification.extracted_schedule.build_up:
+                    dedup_key = (entry.get('date', ''), entry.get('time', ''))
+                    if dedup_key not in seen_build_up:
+                        seen_build_up.add(dedup_key)
+                        all_build_up.append(entry)
+                for entry in classification.extracted_schedule.tear_down:
+                    dedup_key = (entry.get('date', ''), entry.get('time', ''))
+                    if dedup_key not in seen_tear_down:
+                        seen_tear_down.add(dedup_key)
+                        all_tear_down.append(entry)
 
             # Aggregate contacts
             if classification.extracted_contacts:

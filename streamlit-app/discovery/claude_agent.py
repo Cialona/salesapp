@@ -2693,24 +2693,32 @@ Kind regards,
                     output.documents.downloads_overview_url = page
                     break
 
-        # Add extracted schedules from PDFs
+        # Add extracted schedules from PDFs (with deduplication by date+time)
         if classification.aggregated_schedule:
+            seen_build_up = {(e.date, e.time) for e in output.schedule.build_up}
             for entry in classification.aggregated_schedule.build_up:
                 if entry.get('date'):
-                    output.schedule.build_up.append(ScheduleEntry(
-                        date=entry.get('date'),
-                        time=entry.get('time', ''),
-                        description=entry.get('description', 'Build-up'),
-                        source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
-                    ))
+                    dedup_key = (entry.get('date'), entry.get('time', ''))
+                    if dedup_key not in seen_build_up:
+                        seen_build_up.add(dedup_key)
+                        output.schedule.build_up.append(ScheduleEntry(
+                            date=entry.get('date'),
+                            time=entry.get('time', ''),
+                            description=entry.get('description', 'Build-up'),
+                            source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
+                        ))
+            seen_tear_down = {(e.date, e.time) for e in output.schedule.tear_down}
             for entry in classification.aggregated_schedule.tear_down:
                 if entry.get('date'):
-                    output.schedule.tear_down.append(ScheduleEntry(
-                        date=entry.get('date'),
-                        time=entry.get('time', ''),
-                        description=entry.get('description', 'Tear-down'),
-                        source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
-                    ))
+                    dedup_key = (entry.get('date'), entry.get('time', ''))
+                    if dedup_key not in seen_tear_down:
+                        seen_tear_down.add(dedup_key)
+                        output.schedule.tear_down.append(ScheduleEntry(
+                            date=entry.get('date'),
+                            time=entry.get('time', ''),
+                            description=entry.get('description', 'Tear-down'),
+                            source_url=classification.aggregated_schedule.source_url or output.documents.exhibitor_manual_url or ''
+                        ))
             if output.schedule.build_up or output.schedule.tear_down:
                 output.quality.schedule = "strong"
                 output.primary_reasoning.schedule = f"PRE-SCAN: Schema geëxtraheerd uit PDF ({len(output.schedule.build_up)} opbouw, {len(output.schedule.tear_down)} afbouw entries)"
