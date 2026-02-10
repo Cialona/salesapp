@@ -356,24 +356,28 @@ class DocumentClassifier:
 
             for page in exhibitor_pages:
                 page_lower = page.lower()
+                # Use URL path for scoring (not hostname, to avoid false positives)
+                page_path = urlparse(page_lower).path.rstrip('/')
                 score = 0
 
                 # Strong directory indicators (high score)
-                if '/exhibitors' == page_lower.split('?')[0].rstrip('/').split('/')[-1]:
-                    score += 10  # Exact /exhibitors path
-                if any(kw in page_lower for kw in ['directory', 'catalogue', 'catalog', '/exhibitors']):
+                if page_path.endswith('/exhibitors') or page_path.endswith('/exhibitor-list') or page_path.endswith('/exhibitor-lists'):
+                    score += 10  # Exact exhibitor directory path
+                if any(kw in page_path for kw in ['directory', 'catalogue', 'catalog', '/exhibitors']):
                     score += 5
-                if any(kw in page_lower for kw in ['list', 'companies', 'espositori', 'aussteller']):
-                    score += 3
-                if 'exposant' in page_lower:
+                if any(kw in page_path for kw in ['exhibitor-list', 'exhibitor list', '/companies', '/espositori', '/aussteller']):
+                    score += 5
+                if any(kw in page_path for kw in ['/list', 'exposant']):
                     score += 3
 
                 # Weak indicators (these might be resource pages, not directories)
-                if 'exhibitor' in page_lower and score == 0:
+                if 'exhibitor' in page_path and score == 0:
                     score += 1
 
                 # Penalty for non-directory pages
-                if any(kw in page_lower for kw in ['resource', 'service', 'download', 'manual', 'guide', 'technical']):
+                if any(kw in page_path for kw in ['resource', 'service', 'download', 'manual', 'guide', 'technical',
+                                                    'checklist', 'register', 'login', 'dashboard', 'faq',
+                                                    'shipping', 'marketing', 'contact', 'order', 'profile']):
                     score -= 3
 
                 if score > best_score:
@@ -609,12 +613,12 @@ class DocumentClassifier:
             if any(kw in combined for kw in ['vehicle access', 'parking', 'catering', 'restaurant', 'accreditation']):
                 score -= 5
         elif doc_type == 'rules':
-            if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule']):
+            if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule', 'design regulation']):
                 score += 10
-            if any(kw in combined for kw in ['technical guideline', 'stand design']):
+            if any(kw in combined for kw in ['technical guideline', 'stand design', 'design rule']):
                 score += 5
         elif doc_type == 'schedule':
-            if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule']):
+            if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule', 'event schedule']):
                 score += 10
             if any(kw in combined for kw in ['schedule', 'timing', 'move-in']):
                 score += 5
@@ -630,14 +634,16 @@ class DocumentClassifier:
 
         if any(kw in combined for kw in [
             'stand build rule', 'construction rule', 'technical guideline',
-            'technical regulation', 'height limit', 'fire safety',
+            'technical regulation', 'design regulation', 'design rule',
+            'height limit', 'fire safety',
             'electrical requirement', 'stand design rule',
         ]):
             return 'rules'
 
         if any(kw in combined for kw in [
-            'build-up schedule', 'dismantling schedule', 'tear-down',
-            'move-in schedule', 'set-up and dismantl', 'build up & dismantl',
+            'event schedule', 'build-up schedule', 'dismantling schedule',
+            'tear-down', 'move-in schedule', 'set-up and dismantl',
+            'build up & dismantl',
         ]):
             return 'schedule'
 

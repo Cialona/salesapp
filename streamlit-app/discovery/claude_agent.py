@@ -362,7 +362,8 @@ class ClaudeAgent:
             'document_pages': [],
             'exhibitor_pages': [],
             'all_links': [],
-            'emails': []  # Discovered email addresses
+            'emails': [],  # Discovered email addresses
+            'exhibitor_portal_subdomains': []  # Verified exhibitor portal subdomains (e.g., exhibitors-seg.seafoodexpo.com)
         }
 
         parsed_base = urlparse(base_url)
@@ -515,6 +516,7 @@ class ClaudeAgent:
             for subdomain in verified_subdomains:
                 portal_url = f"https://{subdomain}"
                 related_domains.append(portal_url)
+                results['exhibitor_portal_subdomains'].append(portal_url)
                 # Also add to exhibitor_pages so agent sees them in the instructions
                 if portal_url not in results['exhibitor_pages']:
                     results['exhibitor_pages'].insert(0, portal_url)  # Add at start for priority
@@ -1114,6 +1116,14 @@ class ClaudeAgent:
             if source:
                 _collect_url(source)
 
+        # Include verified exhibitor portal subdomains (e.g., exhibitors-seg.seafoodexpo.com)
+        # These were discovered during prescan via subdomain probing and are rich portals
+        for portal_url in pre_scan_results.get('exhibitor_portal_subdomains', []):
+            host = urlparse(portal_url).netloc.lower()
+            dedup_key = f"{host}/"
+            if dedup_key not in candidates_by_key:
+                candidates_by_key[dedup_key] = [portal_url]
+
         # For each dedup key, pick the best entry point URL
         # Prefer /s/Home over any other page
         portal_urls = []
@@ -1325,16 +1335,18 @@ class ClaudeAgent:
         # Rules / technical guidelines (check first - most specific)
         if any(kw in combined for kw in [
             'stand build rule', 'construction rule', 'technical guideline',
-            'technical regulation', 'stand design rule', 'height limit',
+            'technical regulation', 'stand design rule', 'design regulation',
+            'design rule', 'height limit',
             'fire safety', 'electrical', 'construction requirement',
         ]):
             return 'rules'
 
         # Schedule / build-up & tear-down
         if any(kw in combined for kw in [
-            'build-up schedule', 'build up schedule', 'dismantling schedule',
-            'tear-down schedule', 'move-in schedule', 'set-up schedule',
-            'build-up & dismantl', 'aufbau und abbau', 'opbouw en afbouw',
+            'event schedule', 'build-up schedule', 'build up schedule',
+            'dismantling schedule', 'tear-down schedule', 'move-in schedule',
+            'set-up schedule', 'build-up & dismantl',
+            'aufbau und abbau', 'opbouw en afbouw',
         ]):
             return 'schedule'
 
@@ -1348,7 +1360,8 @@ class ClaudeAgent:
         # Exhibitor manual (broader match)
         if any(kw in combined for kw in [
             'exhibitor manual', 'exhibitor handbook', 'exhibitor guide',
-            'welcome pack', 'event manual', 'service documentation',
+            'welcome pack', 'event manual', 'event information',
+            'service documentation',
         ]):
             return 'exhibitor_manual'
 
