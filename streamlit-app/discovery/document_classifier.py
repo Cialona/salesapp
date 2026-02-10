@@ -492,6 +492,28 @@ class DocumentClassifier:
             if not mapped_type:
                 continue
 
+            # Known floorplan providers: auto-classify as STRONG without LLM
+            # These are definitively floorplans regardless of text content
+            known_floorplan_providers = ['expocad.com', 'a2zinc.net']
+            if mapped_type == 'floorplan' and any(fp in page_url.lower() for fp in known_floorplan_providers):
+                classification = DocumentClassification(
+                    url=page_url,
+                    document_type='floorplan',
+                    confidence='strong',
+                    title=page.get('page_title', 'Interactive Floorplan'),
+                    reason='Known floorplan provider (interactive)',
+                    is_validated=True,
+                    year_verified=True,
+                    fair_verified=True,
+                    content_verified=True,
+                    text_excerpt=text_content[:1000],
+                )
+                existing = getattr(result, 'floorplan', None)
+                if not existing or existing.confidence != 'strong':
+                    setattr(result, 'floorplan', classification)
+                    self.log(f"  ✓ Known floorplan provider: {page_url[:70]}...")
+                continue
+
             # Validate the page content with LLM (same as PDF but no download needed)
             # Note: we always validate portal pages even if a STRONG classification exists,
             # because dedicated portal sub-pages (e.g., "Build up & Dismantling Schedule")
@@ -506,22 +528,21 @@ class DocumentClassifier:
             if classification.confidence == 'strong':
                 should_replace = True
                 if existing and existing.confidence == 'strong':
-                    # Both STRONG: only override if new page is more comprehensive
-                    # Compare by: also_contains count > text length > keep existing
-                    new_cross_refs = len(classification.also_contains or [])
-                    old_cross_refs = len(existing.also_contains or [])
+                    # Both STRONG: compare by URL/title relevance, then text length
+                    new_score = self._type_relevance_score(mapped_type, page_url, page.get('page_title', ''))
+                    old_score = self._type_relevance_score(mapped_type, existing.url or '', existing.title or '')
                     new_text_len = len(classification.text_excerpt or '')
                     old_text_len = len(existing.text_excerpt or '')
 
-                    if new_cross_refs > old_cross_refs:
+                    if new_score > old_score:
                         should_replace = True
-                        self.log(f"  ⬆ Portal page [{mapped_type}]: overrides (more comprehensive: {new_cross_refs} vs {old_cross_refs} cross-refs)")
-                    elif new_cross_refs == old_cross_refs and new_text_len > old_text_len:
+                        self.log(f"  ⬆ Portal page [{mapped_type}]: overrides (better title match: {new_score} vs {old_score})")
+                    elif new_score == old_score and new_text_len > old_text_len:
                         should_replace = True
                         self.log(f"  ⬆ Portal page [{mapped_type}]: overrides (more content: {new_text_len} vs {old_text_len} chars)")
                     else:
                         should_replace = False
-                        self.log(f"  ≡ Portal page [{mapped_type}]: kept existing (more comprehensive)")
+                        self.log(f"  ≡ Portal page [{mapped_type}]: kept existing (better match)")
 
                 if should_replace:
                     setattr(result, mapped_type, classification)
@@ -572,6 +593,36 @@ class DocumentClassifier:
                         result.exhibitor_manual = classification
                         self.log(f"  ✓ Portal home as exhibitor_manual: {classification.confidence}")
                         break
+
+    def _type_relevance_score(self, doc_type: str, url: str, title: str) -> int:
+        """Score how well a URL/title matches a document type. Higher = better match."""
+        combined = f"{url} {title}".lower()
+        score = 0
+
+        if doc_type == 'exhibitor_manual':
+            # Strong indicators for exhibitor manual
+            if any(kw in combined for kw in ['event rules', 'exhibitor manual', 'welcome pack', 'event manual']):
+                score += 10
+            if any(kw in combined for kw in ['rules and regulation', 'handbook', 'exhibitor guide']):
+                score += 5
+            # Penalty for very specific/niche pages
+            if any(kw in combined for kw in ['vehicle access', 'parking', 'catering', 'restaurant', 'accreditation']):
+                score -= 5
+        elif doc_type == 'rules':
+            if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule']):
+                score += 10
+            if any(kw in combined for kw in ['technical guideline', 'stand design']):
+                score += 5
+        elif doc_type == 'schedule':
+            if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule']):
+                score += 10
+            if any(kw in combined for kw in ['schedule', 'timing', 'move-in']):
+                score += 5
+        elif doc_type == 'floorplan':
+            if any(kw in combined for kw in ['floorplan', 'floor plan', 'expocad', 'hall plan']):
+                score += 10
+
+        return score
 
     def _detect_content_type(self, url: str, text: str) -> Optional[str]:
         """Detect document type from page URL and content."""
