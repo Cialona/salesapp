@@ -150,15 +150,23 @@ with tab_docs:
         doc_info = DOCUMENT_TYPES.get(doc_key, {})
         raw_url = docs.get(url_key)
 
-        # Robust URL validation
+        # Robust URL extraction — handle str, list, dict, or unexpected types
         url = None
         if raw_url:
-            if isinstance(raw_url, str) and raw_url.startswith('http'):
-                url = raw_url.strip()
-            elif isinstance(raw_url, (list, tuple)) and len(raw_url) > 0:
-                first = raw_url[0]
-                if isinstance(first, str) and first.startswith('http'):
-                    url = first.strip()
+            candidate = None
+            if isinstance(raw_url, str):
+                candidate = raw_url.strip()
+            elif isinstance(raw_url, (list, tuple)):
+                for item in raw_url:
+                    if isinstance(item, str) and item.strip().startswith('http'):
+                        candidate = item.strip()
+                        break
+            elif isinstance(raw_url, dict):
+                # Some outputs nest URL in a dict like {"url": "http://...""}
+                candidate = str(raw_url.get('url', '') or '').strip()
+
+            if candidate and candidate.startswith('http'):
+                url = candidate
 
         # Encode spaces and special chars in URL path for link_button compatibility
         if url and ' ' in url:
@@ -186,7 +194,11 @@ with tab_docs:
             """, unsafe_allow_html=True)
 
             if found:
-                st.link_button("📥 Openen", url, use_container_width=True, key=f"open_{doc_key}")
+                try:
+                    st.link_button("📥 Openen", url, use_container_width=True, key=f"open_{doc_key}")
+                except Exception:
+                    # Fallback: render as clickable markdown link if link_button rejects the URL
+                    st.markdown(f"[📥 Openen]({url})")
             else:
                 st.button("❌ Niet gevonden", disabled=True, use_container_width=True, key=f"missing_{doc_key}")
 
