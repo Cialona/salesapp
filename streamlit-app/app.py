@@ -5,6 +5,7 @@ Cialona Trade Fair Discovery - Main Dashboard
 import streamlit as st
 from pathlib import Path
 import data_manager as dm
+import job_manager as jm
 from config import (
     CUSTOM_CSS, CIALONA_ORANGE, CIALONA_NAVY, CIALONA_WHITE,
     DOCUMENT_TYPES, APP_TITLE, APP_ICON, ADMIN_PIN,
@@ -111,6 +112,34 @@ st.markdown(f"""
     <p class="tagline">Automatisch exhibitor documenten vinden voor standbouw projecten</p>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Active discoveries banner ─────────────────────────────────────────────
+active_jobs = jm.get_active_jobs()
+if active_jobs:
+    n = len(active_jobs)
+    names = ", ".join(f"{j.fair_name} {j.fair_year}" for j in active_jobs[:3])
+    if n > 3:
+        names += f" +{n - 3} meer"
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, {CIALONA_ORANGE}15 0%, {CIALONA_ORANGE}08 100%);
+                border: 1px solid {CIALONA_ORANGE}40; border-radius: 10px; padding: 0.75rem 1.25rem;
+                margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <span style="color: {CIALONA_ORANGE}; font-weight: 600;">
+                {n} discovery{'s' if n > 1 else ''} actief
+            </span>
+            <span style="color: #6B7280; margin-left: 0.5rem;">{names}</span>
+        </div>
+        <span style="color: {CIALONA_ORANGE}; font-size: 0.85rem;">
+            Bekijk voortgang op de Discovery pagina
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("Bekijk actieve discoveries", use_container_width=True, key="goto_active"):
+        st.switch_page("pages/1_Discovery.py")
+
+    st.markdown("")
 
 # ── Empty state: welcoming onboarding ────────────────────────────────────
 if not has_fairs:

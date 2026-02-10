@@ -326,10 +326,12 @@ class ClaudeAgent:
         max_iterations: int = 40,
         debug: bool = False,
         on_status: Optional[Callable[[str], None]] = None,
-        on_phase: Optional[Callable[[str], None]] = None
+        on_phase: Optional[Callable[[str], None]] = None,
+        download_dir_suffix: str = "",
     ):
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.browser = BrowserController(1024, 768)
+        self._download_dir_suffix = download_dir_suffix
+        self.browser = BrowserController(1024, 768, download_dir_suffix=download_dir_suffix)
         self.max_iterations = max_iterations
         self.debug = debug
         self.on_status = on_status or (lambda x: None)
@@ -648,7 +650,7 @@ class ClaudeAgent:
         found_pages_to_scan = []  # Pages found that we should also scan
 
         # Create a lightweight browser for pre-scanning
-        pre_scan_browser = BrowserController(800, 600)  # Smaller viewport for speed
+        pre_scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)  # Smaller viewport for speed
 
         try:
             await pre_scan_browser.launch()
@@ -1191,7 +1193,7 @@ class ClaudeAgent:
             'floor plan', 'floorplan', 'hall plan', 'map', 'layout', 'venue',
         ]
 
-        scan_browser = BrowserController(800, 600)
+        scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
         try:
             await scan_browser.launch()
 
@@ -1387,7 +1389,7 @@ class ClaudeAgent:
                     continue
 
                 # Otherwise try to scan the page for PDFs
-                scan_browser = BrowserController(800, 600)
+                scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
                 try:
                     await scan_browser.launch()
                     await scan_browser.goto(url)
