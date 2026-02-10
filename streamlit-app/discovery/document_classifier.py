@@ -573,7 +573,7 @@ class DocumentClassifier:
             return 'schedule'
 
         if any(kw in combined for kw in [
-            'floor plan', 'floorplan', 'hall plan', 'venue map',
+            'floor plan', 'floorplan', 'hall plan', 'venue map', 'expocad',
         ]):
             return 'floorplan'
 
@@ -845,7 +845,7 @@ class DocumentClassifier:
         - Organization name if found
         """
         type_descriptions = {
-            'floorplan': 'een plattegrond/floorplan met hal-indelingen, standnummers, of venue layout',
+            'floorplan': 'een plattegrond/floorplan met hal-indelingen, standnummers, of venue layout (ook interactieve plattegronden zoals ExpoCad)',
             'exhibitor_manual': 'een exposanten handleiding/manual met informatie over standbouw, regels voor exposanten, of een "welcome pack"',
             'rules': 'technische richtlijnen/regulations met constructie-eisen, elektra specificaties, of veiligheidsvoorschriften',
             'schedule': 'een opbouw/afbouw schema met specifieke datums en tijden voor move-in/move-out',
