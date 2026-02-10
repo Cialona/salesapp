@@ -604,8 +604,22 @@ class ClaudeAgent:
             '/for-exhibitors', '/en/for-exhibitors',
             '/en/stand-construction', '/stand-construction',
             '/en/exhibitor-services', '/exhibitor-services',
+            '/exhibitor-info', '/exhibitor-resources', '/exhibitor-guide',
+            '/exhibitor-list', '/exhibitor-directory',
+            '/venue-information', '/logistics',
             # German
             '/aussteller', '/de/aussteller', '/technik', '/de/technik',
+            '/de/downloads', '/de/aussteller-services',
+            # French
+            '/fr/exposants', '/exposants', '/fr/participer', '/participer',
+            '/fr/services', '/fr/telechargements',
+            '/fr/reglement-technique',
+            # Spanish
+            '/es/expositores', '/expositores', '/es/participar', '/participar',
+            '/es/servicios', '/es/descargas',
+            # Dutch
+            '/nl/exposanten', '/exposanten', '/nl/deelnemen', '/deelnemen',
+            '/nl/diensten', '/nl/downloads',
             # Italian
             '/espositori', '/it/espositori', '/partecipare', '/it/partecipare',
         ]
@@ -806,15 +820,20 @@ class ClaudeAgent:
                             # === NEW: Detect external event management platforms ===
                             # Salesforce community sites, event platforms, etc.
                             external_platform_indicators = [
-                                'my.site.com',      # Salesforce community (e.g., gsma.my.site.com)
+                                'my.site.com',      # Salesforce community
                                 'force.com',        # Salesforce
                                 'salesforce.com',   # Salesforce
                                 'cvent.com',        # Cvent event platform
                                 'eventbrite.',      # Eventbrite
-                                'a]zinc.net',       # A2Z event platform
+                                'a2zinc.net',       # A2Z event platform
                                 'expocad.',         # ExpoCad
                                 'map-dynamics.',    # Map Dynamics
                                 'n200.com',         # Nth Degree events
+                                'mapyourshow.com',  # Map Your Show
+                                'smallworldlabs.com', # Small World Labs
+                                'swapcard.com',     # Swapcard
+                                'grip.events',      # Grip
+                                'ungerboeck',       # Ungerboeck
                             ]
 
                             is_external_platform = any(plat in link_host for plat in external_platform_indicators)
@@ -899,10 +918,28 @@ class ClaudeAgent:
                         if re.search(r'/exhibitors?/\d+-', lower_url):
                             continue
 
-                        # Skip fragment-only variations and login redirects
-                        if '#cookies' in lower_url or '#maincontent' in lower_url:
-                            continue
-                        if '/mymwc?' in lower_url or 'next=' in lower_url:
+                        # Strip URL fragments for deduplication (e.g., /page#content vs /page)
+                        defragged_url = link.url.split('#')[0]
+                        if defragged_url != link.url:
+                            # This URL has a fragment; skip if we already have the base URL
+                            if defragged_url in seen_urls:
+                                continue
+
+                        # Skip noise: login, auth, password, dashboard, admin pages
+                        noise_patterns = [
+                            '#cookies', '#maincontent', '#content',
+                            '/login', '/signin', '/sign-in', '/auth',
+                            '/password', '/forgot-password', '/reset-password',
+                            '/account-recovery', '/secur/',
+                            '/dashboard', '/admin', '/api/',
+                            '/search?', '/find?', '/query?',
+                            '/confirmation', '/thank-you', '/success',
+                            '/mymwc?', 'next=',
+                            '/print/', '/share/',
+                            '/404', '/error',
+                            '/cart', '/checkout', '/payment',
+                        ]
+                        if any(pat in lower_url for pat in noise_patterns):
                             continue
 
                         # Check if URL OR TEXT contains document keywords
@@ -1083,6 +1120,13 @@ class ClaudeAgent:
             'a2zinc.net',          # A2Z
             'expocad.',            # ExpoCad
             'smallworldlabs.com',  # SWL
+            'eventbrite.',         # Eventbrite
+            'map-dynamics.',       # Map Dynamics
+            'n200.com',            # Nth Degree
+            'mapyourshow.com',     # Map Your Show
+            'swapcard.com',        # Swapcard
+            'grip.events',         # Grip
+            'ungerboeck',          # Ungerboeck
         ]
 
         # Collect all candidate URLs per dedup key (host + path prefix)
@@ -1328,14 +1372,25 @@ class ClaudeAgent:
 
     def _detect_page_type(self, url: str, link_text: str, page_text: str) -> str:
         """Detect the document type of a web page based on URL, title, and content."""
-        combined = f"{url} {link_text or ''} {page_text[:500]}".lower()
+        # Check URL + link text + first 1500 chars of content (not just 500)
+        combined = f"{url} {link_text or ''} {page_text[:1500]}".lower()
 
         # Rules / technical guidelines (check first - most specific)
         if any(kw in combined for kw in [
             'stand build rule', 'construction rule', 'technical guideline',
             'technical regulation', 'stand design rule', 'design regulation',
-            'design rule', 'height limit',
+            'design rule', 'height limit', 'technical specification',
             'fire safety', 'electrical', 'construction requirement',
+            # German
+            'technische richtlinie', 'standbauvorgabe', 'bauvorschrift',
+            # French
+            'reglement technique', 'règlement technique',
+            # Spanish
+            'reglamento tecnico', 'regulación técnica',
+            # Italian
+            'regolamento tecnico',
+            # Dutch
+            'technische richtlijn', 'standbouwregels',
         ]):
             return 'rules'
 
@@ -1343,15 +1398,32 @@ class ClaudeAgent:
         if any(kw in combined for kw in [
             'event schedule', 'build-up schedule', 'build up schedule',
             'dismantling schedule', 'tear-down schedule', 'move-in schedule',
-            'set-up schedule', 'build-up & dismantl',
-            'aufbau und abbau', 'opbouw en afbouw',
+            'set-up schedule', 'build-up & dismantl', 'installation & dismantl',
+            'setup and dismantle', 'setup & dismantle',
+            # German
+            'aufbau und abbau', 'aufbauzeiten', 'abbauzeiten',
+            # French
+            'calendrier de montage', 'montage et démontage',
+            # Spanish
+            'calendario de montaje', 'montaje y desmontaje',
+            # Italian
+            'calendario allestimento', 'allestimento e smontaggio',
+            # Dutch
+            'opbouw en afbouw', 'opbouwschema',
         ]):
             return 'schedule'
 
         # Floor plan
         if any(kw in combined for kw in [
             'floor plan', 'floorplan', 'hall plan', 'site map', 'venue map',
-            'exhibition layout', 'hallenplan', 'plattegrond', 'expocad',
+            'exhibition layout', 'expo floorplan',
+            'hallenplan', 'plattegrond', 'expocad', 'mapyourshow',
+            # French
+            'plan du salon', 'plan des halls',
+            # Spanish
+            'plano de la feria', 'plano del recinto',
+            # Italian
+            'pianta del salone', 'planimetria',
         ]):
             return 'floorplan'
 
@@ -1359,7 +1431,17 @@ class ClaudeAgent:
         if any(kw in combined for kw in [
             'exhibitor manual', 'exhibitor handbook', 'exhibitor guide',
             'welcome pack', 'event manual', 'event information',
-            'service documentation',
+            'exhibitor info', 'service documentation', 'exhibitor resource',
+            # German
+            'ausstellerhandbuch', 'ausstellerinformation',
+            # French
+            'manuel exposant', 'guide exposant',
+            # Spanish
+            'manual del expositor', 'guía del expositor',
+            # Italian
+            'manuale espositore', 'guida espositore',
+            # Dutch
+            'handleiding exposant', 'exposanten handleiding',
         ]):
             return 'exhibitor_manual'
 
@@ -1474,10 +1556,14 @@ class ClaudeAgent:
             'cvent.com',        # Cvent
             'a2zinc.net',       # A2Z events
             'expocad.com',      # ExpoCad
-            'smallworldlabs.com',  # Small World Labs (Seafood Expo)
-            'event-assets.',    # GSMA event assets
-            'gsma.com',         # GSMA directly
-            'gsma.',            # Any GSMA subdomain
+            'smallworldlabs.com',  # Small World Labs
+            'eventbrite.',      # Eventbrite
+            'map-dynamics.',    # Map Dynamics
+            'n200.com',         # Nth Degree
+            'mapyourshow.com',  # Map Your Show
+            'swapcard.com',     # Swapcard
+            'grip.events',      # Grip
+            'ungerboeck',       # Ungerboeck
         ]
 
         # Also interested in any PDF that matches fair-related keywords
@@ -2230,15 +2316,20 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             self._log(f"Totale tijd: {int(time.time() - start_time)}s | Iteraties: {iteration}")
             output.debug.discovery_log = list(self._discovery_log)
 
-            # Add discovered emails to output
+            # Add discovered emails to output (with deduplication)
             if pre_scan_results and pre_scan_results.get('emails'):
+                existing_emails = {e.email for e in output.contact_info.emails}
+                added = 0
                 for email_data in pre_scan_results['emails']:
-                    output.contact_info.emails.append(ContactEmail(
-                        email=email_data['email'],
-                        context=email_data.get('context', ''),
-                        source_url=email_data.get('source_url', '')
-                    ))
-                self._log(f"Added {len(pre_scan_results['emails'])} contact emails to output")
+                    if email_data['email'] not in existing_emails:
+                        existing_emails.add(email_data['email'])
+                        output.contact_info.emails.append(ContactEmail(
+                            email=email_data['email'],
+                            context=email_data.get('context', ''),
+                            source_url=email_data.get('source_url', '')
+                        ))
+                        added += 1
+                self._log(f"Added {added} contact emails to output")
 
             # Select recommended email for fair organization
             self._select_recommended_email(output)
@@ -2601,25 +2692,35 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             schedule_validation = result.get("schedule_validation", "")
 
             if schedule and is_validated(schedule_validation):
+                # Deduplicate schedule entries (same pattern as classification merge)
+                seen_build_up = {(e.date, e.time) for e in output.schedule.build_up}
+                seen_tear_down = {(e.date, e.time) for e in output.schedule.tear_down}
+
                 build_up = schedule.get("build_up", [])
                 if isinstance(build_up, list):
                     for entry in build_up:
-                        output.schedule.build_up.append(ScheduleEntry(
-                            date=entry.get("date"),
-                            time=entry.get("time"),
-                            description=entry.get("description", ""),
-                            source_url=output.documents.exhibitor_manual_url or output.official_url or ""
-                        ))
+                        dedup_key = (entry.get("date"), entry.get("time", ""))
+                        if dedup_key not in seen_build_up:
+                            seen_build_up.add(dedup_key)
+                            output.schedule.build_up.append(ScheduleEntry(
+                                date=entry.get("date"),
+                                time=entry.get("time"),
+                                description=entry.get("description", ""),
+                                source_url=output.documents.exhibitor_manual_url or output.official_url or ""
+                            ))
 
                 tear_down = schedule.get("tear_down", [])
                 if isinstance(tear_down, list):
                     for entry in tear_down:
-                        output.schedule.tear_down.append(ScheduleEntry(
-                            date=entry.get("date"),
-                            time=entry.get("time"),
-                            description=entry.get("description", ""),
-                            source_url=output.documents.exhibitor_manual_url or output.official_url or ""
-                        ))
+                        dedup_key = (entry.get("date"), entry.get("time", ""))
+                        if dedup_key not in seen_tear_down:
+                            seen_tear_down.add(dedup_key)
+                            output.schedule.tear_down.append(ScheduleEntry(
+                                date=entry.get("date"),
+                                time=entry.get("time"),
+                                description=entry.get("description", ""),
+                                source_url=output.documents.exhibitor_manual_url or output.official_url or ""
+                            ))
 
                 if output.schedule.build_up or output.schedule.tear_down:
                     output.quality.schedule = "strong"

@@ -498,7 +498,7 @@ class DocumentClassifier:
 
             # Known floorplan providers: auto-classify as STRONG without LLM
             # These are definitively floorplans regardless of text content
-            known_floorplan_providers = ['expocad.com', 'a2zinc.net']
+            known_floorplan_providers = ['expocad.com', 'a2zinc.net', 'mapyourshow.com', 'map-dynamics.']
             if mapped_type == 'floorplan' and any(fp in page_url.lower() for fp in known_floorplan_providers):
                 classification = DocumentClassification(
                     url=page_url,
@@ -630,25 +630,32 @@ class DocumentClassifier:
 
     def _detect_content_type(self, url: str, text: str) -> Optional[str]:
         """Detect document type from page URL and content."""
-        combined = f"{url} {text[:500]}".lower()
+        combined = f"{url} {text[:1500]}".lower()
 
         if any(kw in combined for kw in [
             'stand build rule', 'construction rule', 'technical guideline',
             'technical regulation', 'design regulation', 'design rule',
-            'height limit', 'fire safety',
+            'technical specification', 'height limit', 'fire safety',
             'electrical requirement', 'stand design rule',
+            'reglement technique', 'regolamento tecnico', 'reglamento tecnico',
+            'technische richtlijn', 'standbouwregels',
         ]):
             return 'rules'
 
         if any(kw in combined for kw in [
             'event schedule', 'build-up schedule', 'dismantling schedule',
             'tear-down', 'move-in schedule', 'set-up and dismantl',
-            'build up & dismantl',
+            'build up & dismantl', 'installation & dismantl',
+            'setup and dismantle', 'setup & dismantle',
+            'montage et démontage', 'montaje y desmontaje',
+            'allestimento e smontaggio', 'opbouw en afbouw',
         ]):
             return 'schedule'
 
         if any(kw in combined for kw in [
-            'floor plan', 'floorplan', 'hall plan', 'venue map', 'expocad',
+            'floor plan', 'floorplan', 'hall plan', 'venue map', 'expo floorplan',
+            'expocad', 'mapyourshow', 'map-dynamics',
+            'hallenplan', 'plattegrond', 'planimetria',
         ]):
             return 'floorplan'
 
