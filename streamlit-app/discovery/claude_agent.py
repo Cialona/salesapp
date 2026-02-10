@@ -1552,13 +1552,12 @@ class ClaudeAgent:
     async def _web_search_for_portals(self, fair_name: str) -> dict:
         """
         Search the web for exhibitor portals and event manuals.
-        Uses DuckDuckGo HTML search (no API key required).
+        Uses DuckDuckGo HTML search via Playwright browser (urllib is blocked
+        in some production environments).
 
         Returns dict with 'pdf_links' and 'portal_urls'.
         """
-        import urllib.request
         import urllib.parse
-        import urllib.error
 
         found_pdfs = []
         found_portals = []
@@ -1609,113 +1608,95 @@ class ClaudeAgent:
             'getting-started', 'rules', 'schedule', 'event-info', 'handbook',
         ]
 
-        # Rotate User-Agents to reduce chance of being blocked
-        user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
-        ]
+        # Launch a lightweight Playwright browser for searches
+        # (urllib GET requests to DuckDuckGo are blocked in some environments)
+        search_browser = BrowserController(800, 600)
+        try:
+            await search_browser.launch()
+        except Exception as e:
+            self._log(f"    ⚠️ Could not launch search browser: {e}")
+            return {'pdf_links': [], 'portal_urls': []}
 
-        for qi, query in enumerate(search_queries[:4]):  # Check 4 searches
-            try:
-                self._log(f"    🔍 Web search: '{query}'")
-                # Use DuckDuckGo HTML search
-                encoded_query = urllib.parse.quote_plus(query)
-                search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+        try:
+            for qi, query in enumerate(search_queries[:4]):  # Check 4 searches
+                try:
+                    self._log(f"    🔍 Web search: '{query}'")
+                    encoded_query = urllib.parse.quote_plus(query)
+                    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
-                # Try up to 2 attempts with increasing timeout
-                html = None
-                for attempt, timeout_val in enumerate([15, 25]):
                     try:
-                        req = urllib.request.Request(
-                            search_url,
-                            headers={
-                                'User-Agent': user_agents[(qi + attempt) % len(user_agents)],
-                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                                'Accept-Language': 'en-US,en;q=0.5',
-                            }
-                        )
-                        with urllib.request.urlopen(req, timeout=timeout_val) as response:
-                            html = response.read().decode('utf-8', errors='ignore')
-                        break  # Success
-                    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
-                        if attempt == 0:
-                            await asyncio.sleep(2)  # Wait before retry
+                        await search_browser.goto(search_url)
+                        html = await search_browser._page.content()
+                    except Exception as e:
+                        self._log(f"    Web search error: {e}")
                         continue
 
-                if not html:
-                    self._log(f"    Web search error: timed out after retries")
+                    if not html:
+                        continue
+
+                    # Extract URLs from DuckDuckGo results
+                    # DDG returns results in result__a links, but href format varies:
+                    # - Direct URLs: href="https://example.com/..."
+                    # - Redirect URLs: href="//duckduckgo.com/l/?uddg=https%3A%2F%2F..."
+                    raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+                    if not raw_hrefs:
+                        # Fallback: scan entire HTML for uddg= parameters
+                        raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+
+                    # Resolve each href to its actual URL
+                    matches = []
+                    for href in raw_hrefs:
+                        uddg_match = re.search(r'uddg=([^&"]+)', href)
+                        if uddg_match:
+                            matches.append(urllib.parse.unquote(uddg_match.group(1)))
+                        elif href.startswith('http'):
+                            matches.append(href)
+
+                    for match in matches:
+                        try:
+                            decoded_url = urllib.parse.unquote(match)
+                            parsed = urlparse(decoded_url)
+                            host = parsed.netloc.lower()
+                            path_lower = parsed.path.lower()
+
+                            # Skip non-interesting domains
+                            is_interesting = any(domain in host for domain in interesting_domains)
+                            has_keywords = any(kw in decoded_url.lower() for kw in [
+                                'exhibitor', 'oem', 'event-manual', 'eventmanual',
+                                'stand-build', 'welcome-pack', 'welcomepack',
+                                'technical-regulation', 'technical-guideline',
+                            ])
+                            # Also catch any PDF with fair-related keywords
+                            is_fair_pdf = (
+                                path_lower.endswith('.pdf') and
+                                any(kw in decoded_url.lower() for kw in fair_pdf_keywords)
+                            )
+
+                            if not (is_interesting or has_keywords or is_fair_pdf):
+                                continue
+                            if 'duckduckgo' in host:
+                                continue
+
+                            # Check if it's a PDF
+                            if path_lower.endswith('.pdf'):
+                                # Keep full URL for PDFs
+                                if decoded_url not in found_pdfs:
+                                    found_pdfs.append(decoded_url)
+                                    self._log(f"    📄 Web search found PDF: {decoded_url[:80]}...")
+                            else:
+                                # For portals, clean the URL
+                                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                                if clean_url not in found_portals:
+                                    found_portals.append(clean_url)
+
+                        except Exception:
+                            continue
+
+                except Exception as e:
+                    self._log(f"    Web search error: {e}")
                     continue
-
-                # Small delay between queries to avoid rate limiting
-                if qi < 3:
-                    await asyncio.sleep(1)
-
-                # Extract URLs from DuckDuckGo results
-                # DDG returns results in result__a links, but href format varies:
-                # - Direct URLs: href="https://example.com/..."
-                # - Redirect URLs: href="//duckduckgo.com/l/?uddg=https%3A%2F%2F..."
-                raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
-                if not raw_hrefs:
-                    # Fallback: scan entire HTML for uddg= parameters
-                    raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
-
-                # Resolve each href to its actual URL
-                matches = []
-                for href in raw_hrefs:
-                    uddg_match = re.search(r'uddg=([^&"]+)', href)
-                    if uddg_match:
-                        matches.append(urllib.parse.unquote(uddg_match.group(1)))
-                    elif href.startswith('http'):
-                        matches.append(href)
-
-                for match in matches:
-                    try:
-                        decoded_url = urllib.parse.unquote(match)
-                        parsed = urlparse(decoded_url)
-                        host = parsed.netloc.lower()
-                        path_lower = parsed.path.lower()
-
-                        # Skip non-interesting domains
-                        is_interesting = any(domain in host for domain in interesting_domains)
-                        has_keywords = any(kw in decoded_url.lower() for kw in [
-                            'exhibitor', 'oem', 'event-manual', 'eventmanual',
-                            'stand-build', 'welcome-pack', 'welcomepack',
-                            'technical-regulation', 'technical-guideline',
-                        ])
-                        # Also catch any PDF with fair-related keywords
-                        is_fair_pdf = (
-                            path_lower.endswith('.pdf') and
-                            any(kw in decoded_url.lower() for kw in fair_pdf_keywords)
-                        )
-
-                        if not (is_interesting or has_keywords or is_fair_pdf):
-                            continue
-                        if 'duckduckgo' in host:
-                            continue
-
-                        # Check if it's a PDF
-                        if path_lower.endswith('.pdf'):
-                            # Keep full URL for PDFs
-                            if decoded_url not in found_pdfs:
-                                found_pdfs.append(decoded_url)
-                                self._log(f"    📄 Web search found PDF: {decoded_url[:80]}...")
-                        else:
-                            # For portals, clean the URL
-                            clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                            if clean_url not in found_portals:
-                                found_portals.append(clean_url)
-
-                    except Exception:
-                        continue
-
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-                self._log(f"    Web search error: {e}")
-                continue
-            except Exception as e:
-                self._log(f"    Web search error: {e}")
-                continue
+        finally:
+            await search_browser.close()
 
         # Log search results summary
         if found_pdfs:
