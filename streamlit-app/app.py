@@ -77,10 +77,16 @@ with st.sidebar:
             "Upload logo (PNG)", type=["png"], key="logo_upload"
         )
         if uploaded_logo is not None:
-            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-            LOGO_PATH.write_bytes(uploaded_logo.getvalue())
-            st.success("Logo opgeslagen!")
-            st.rerun()
+            # Only save if file is new (avoid re-saving on every rerun)
+            logo_bytes = uploaded_logo.getvalue()
+            existing = LOGO_PATH.read_bytes() if LOGO_PATH.exists() else b""
+            if logo_bytes != existing:
+                ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+                LOGO_PATH.write_bytes(logo_bytes)
+                st.success("Logo opgeslagen!")
+                st.rerun()
+            else:
+                st.success("Logo actief")
 
         if LOGO_PATH.exists():
             if st.button("Verwijder logo", use_container_width=True):
