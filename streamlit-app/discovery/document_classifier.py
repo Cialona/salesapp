@@ -253,8 +253,10 @@ class DocumentClassifier:
             if any(kw in combined for kw in ['technical', 'regulation', 'rule', 'guideline', 'normativ', 'richtlijn', 'provision']):
                 candidates['rules'].append(pdf)
 
-            # Schedule indicators
-            if any(kw in combined for kw in ['schedule', 'timing', 'build-up', 'buildup', 'tear-down', 'teardown', 'opbouw', 'afbouw', 'move-in', 'move-out']):
+            # Schedule indicators (but not if it's primarily a floorplan document)
+            floorplan_words = ['floorplan', 'floor plan', 'floor-plan', 'plattegrond', 'hall plan', 'venue map']
+            is_primarily_floorplan = any(fkw in combined for fkw in floorplan_words)
+            if not is_primarily_floorplan and any(kw in combined for kw in ['schedule', 'timing', 'build-up', 'buildup', 'tear-down', 'teardown', 'opbouw', 'afbouw', 'move-in', 'move-out']):
                 candidates['schedule'].append(pdf)
 
         # Second pass: Validate best candidates with LLM (STRICT validation)
@@ -312,15 +314,15 @@ class DocumentClassifier:
                 continue
 
             for also_type in classification.also_contains:
-                # Check if this type is still missing or only has weak/partial confidence
+                # Only fill gaps — cross-references should NOT override dedicated pages
                 existing = getattr(result, also_type, None)
-                if not existing or (existing and existing.confidence not in ['strong']):
-                    # This document also contains info for another missing type
-                    # Create a cross-referenced classification
+                if not existing:
+                    # Cross-referenced entries use 'partial' confidence (indirect source)
+                    # This ensures dedicated portal sub-pages can still override them
                     cross_ref = DocumentClassification(
                         url=classification.url,
                         document_type=also_type,
-                        confidence=classification.confidence,
+                        confidence='partial',
                         year=classification.year,
                         title=f"{classification.title} (bevat ook {also_type})" if classification.title else None,
                         reason=f"Cross-reference: gevonden in {doc_type} document",
@@ -333,7 +335,7 @@ class DocumentClassifier:
                         extracted_contacts=classification.extracted_contacts,
                     )
                     setattr(result, also_type, cross_ref)
-                    self.log(f"  🔄 Cross-ref: {doc_type} document bevat ook {also_type} info → {classification.url[:60]}...")
+                    self.log(f"  🔄 Cross-ref: {doc_type} document bevat ook {also_type} info (partial) → {classification.url[:60]}...")
 
         # Collect document references for secondary scan
         all_references = []
@@ -490,23 +492,24 @@ class DocumentClassifier:
             if not mapped_type:
                 continue
 
-            # Skip if we already have a strong classification for this type
-            existing = getattr(result, mapped_type, None)
-            if existing and existing.confidence == 'strong':
-                continue
-
             # Validate the page content with LLM (same as PDF but no download needed)
+            # Note: we always validate portal pages even if a STRONG classification exists,
+            # because dedicated portal sub-pages (e.g., "Build up & Dismantling Schedule")
+            # have richer content than PDF keyword matches or cross-references
             classification = await self._validate_page_content(
                 page_url, text_content, mapped_type,
                 fair_name, fair_keywords, target_year,
                 page_title=page.get('page_title', '')
             )
 
+            existing = getattr(result, mapped_type, None)
             if classification.confidence == 'strong':
+                if existing and existing.confidence == 'strong':
+                    self.log(f"  ⬆ Portal page [{mapped_type}]: overrides previous (was {existing.url[:50]}...)")
                 setattr(result, mapped_type, classification)
                 self.log(f"  ✓ Portal page [{mapped_type}]: STRONG ✓year={classification.year_verified} ✓fair={classification.fair_verified}")
                 self.log(f"    URL: {page_url[:70]}...")
-            elif classification.confidence == 'partial' and not getattr(result, mapped_type):
+            elif classification.confidence == 'partial' and not existing:
                 setattr(result, mapped_type, classification)
                 self.log(f"  ~ Portal page [{mapped_type}]: partial")
 
@@ -870,6 +873,8 @@ KWALITEITSEISEN:
 
 EXTRACTIE (HEEL BELANGRIJK - zoek naar ALLES):
 - Zoek naar opbouw/afbouw datums en tijden (ook als dit niet het verwachte type is!)
+- Maak voor ELKE rij in een opbouw/afbouw tabel een apart entry. Als er per standgrootte (bijv. "Over 950m2", "Under 25m2") verschillende startdatums zijn, maak dan voor ELKE standgrootte een apart build_up entry met de standgrootte in de description.
+- Maak voor ELKE dag van afbouw een apart tear_down entry met datum en openingstijd.
 - Zoek naar contact emails en telefoonnummers
 - Zoek naar de naam van de organiserende partij
 - Zoek naar VERWIJZINGEN naar andere documenten (URLs, documentnamen, "zie document X")
@@ -880,7 +885,7 @@ Antwoord ALLEEN met valide JSON."""
         try:
             response = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
+                max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
             )
 
