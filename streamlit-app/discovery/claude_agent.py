@@ -23,6 +23,12 @@ from .schemas import (
 )
 from .document_classifier import DocumentClassifier, ClassificationResult
 
+
+class _DiscoveryCancelled(Exception):
+    """Internal: raised when a discovery job is cancelled by the user."""
+    pass
+
+
 # Module-level lock: ensures only one discovery does Brave Search at a time.
 # Each discovery runs in its own thread (see job_manager.py), so a threading.Lock
 # serializes Brave requests across concurrent discoveries, preventing 429 rate limits.
@@ -335,6 +341,7 @@ class ClaudeAgent:
         on_status: Optional[Callable[[str], None]] = None,
         on_phase: Optional[Callable[[str], None]] = None,
         download_dir_suffix: str = "",
+        cancel_event: Optional[Any] = None,
     ):
         self.client = anthropic.Anthropic(api_key=api_key)
         self._download_dir_suffix = download_dir_suffix
@@ -343,6 +350,7 @@ class ClaudeAgent:
         self.debug = debug
         self.on_status = on_status or (lambda x: None)
         self.on_phase = on_phase or (lambda x: None)
+        self._cancel_event = cancel_event
         self._discovery_log: List[str] = []  # Detailed log for troubleshooting
         # Compact summary data collected during discovery for short shareable logs
         self._sd: Dict[str, Any] = {
@@ -375,6 +383,12 @@ class ClaudeAgent:
             print(message)
         self.on_status(message)
         self._discovery_log.append(f"[{timestamp}] {message}")
+
+    def _check_cancelled(self) -> None:
+        """Raise if the job has been cancelled by the user."""
+        if self._cancel_event and self._cancel_event.is_set():
+            self._log("⛔ Discovery wordt gestopt...")
+            raise _DiscoveryCancelled()
 
     async def _pre_scan_website(self, base_url: str, fair_name: str = "") -> Dict[str, Any]:
         """
@@ -2430,6 +2444,7 @@ If none are relevant, reply with: []"""
                 return output
 
             # PHASE 1: Pre-scan website for documents (HTML-based, fast)
+            self._check_cancelled()
             self.on_phase("prescan")
             self._log("=" * 60)
             self._log("FASE 1: PRE-SCAN WEBSITE")
@@ -2459,6 +2474,7 @@ If none are relevant, reply with: []"""
 
             # PHASE 1.25: Deep scan external portals (Salesforce, OEM, etc.)
             # These portals have web page content (not PDFs) with rules, schedules, etc.
+            self._check_cancelled()
             self._log("")
             self._log("=" * 60)
             self.on_phase("portal_scan")
@@ -2491,6 +2507,7 @@ If none are relevant, reply with: []"""
                 self._log("⚠️ Geen portal URLs gevonden in pre-scan resultaten")
 
             # PHASE 1.5: Classify found documents with LLM (STRICT validation)
+            self._check_cancelled()
             self._log("")
             self._log("=" * 60)
             self.on_phase("classification")
@@ -2671,6 +2688,7 @@ If none are relevant, reply with: []"""
                 return output
 
             # PHASE 2: Launch browser for visual verification
+            self._check_cancelled()
             self._log("")
             self._log("=" * 60)
             self.on_phase("browser_agent")
@@ -2752,6 +2770,7 @@ Vind informatie voor de beurs: {input_data.fair_name}
             final_result = None
 
             while not done and iteration < effective_max_iterations:
+                self._check_cancelled()
                 iteration += 1
                 self._log(f"Iteration {iteration}/{effective_max_iterations}")
 
