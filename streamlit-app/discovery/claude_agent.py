@@ -2609,46 +2609,60 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 - Bij twijfel: "NIET GEVONDEN" is beter dan een verkeerd document accepteren"""}],
                     })
 
-                # Call Claude with computer use (dynamic prompt when classification available)
-                response = self.client.beta.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=4096,
-                    system=active_system_prompt,
-                    betas=["computer-use-2025-01-24"],
-                    tools=[
-                        {
-                            "type": "computer_20250124",
-                            "name": "computer",
-                            "display_width_px": screenshot.width,
-                            "display_height_px": screenshot.height,
-                            "display_number": 1,
-                        },
-                        {
-                            "name": "goto_url",
-                            "description": "Navigate directly to a URL. Use this to visit PDF links you see in the extracted links, or to check exhibitor directory subdomains like exhibitors.bauma.de",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {
-                                    "url": {
-                                        "type": "string",
-                                        "description": "The full URL to navigate to",
+                # Call Claude with computer use (with retry on rate limit)
+                import random as _rnd
+                response = None
+                for _api_attempt in range(5):
+                    try:
+                        response = self.client.beta.messages.create(
+                            model="claude-sonnet-4-20250514",
+                            max_tokens=4096,
+                            system=active_system_prompt,
+                            betas=["computer-use-2025-01-24"],
+                            tools=[
+                                {
+                                    "type": "computer_20250124",
+                                    "name": "computer",
+                                    "display_width_px": screenshot.width,
+                                    "display_height_px": screenshot.height,
+                                    "display_number": 1,
+                                },
+                                {
+                                    "name": "goto_url",
+                                    "description": "Navigate directly to a URL. Use this to visit PDF links you see in the extracted links, or to check exhibitor directory subdomains like exhibitors.bauma.de",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "url": {
+                                                "type": "string",
+                                                "description": "The full URL to navigate to",
+                                            },
+                                        },
+                                        "required": ["url"],
                                     },
                                 },
-                                "required": ["url"],
-                            },
-                        },
-                        {
-                            "name": "deep_scan",
-                            "description": "Perform a deep scan of the current page to find ALL document links. This expands all accordions, dropdowns, and hidden sections, then extracts every PDF and document link. Use this when you suspect there are hidden documents on the page.",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {},
-                                "required": [],
-                            },
-                        },
-                    ],
-                    messages=messages,
-                )
+                                {
+                                    "name": "deep_scan",
+                                    "description": "Perform a deep scan of the current page to find ALL document links. This expands all accordions, dropdowns, and hidden sections, then extracts every PDF and document link. Use this when you suspect there are hidden documents on the page.",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {},
+                                        "required": [],
+                                    },
+                                },
+                            ],
+                            messages=messages,
+                        )
+                        break  # Success
+                    except anthropic.RateLimitError as e:
+                        wait = (2 ** _api_attempt) * 5 + _rnd.uniform(0, 3)  # 5s, 13s, 23s, 43s, 83s
+                        self._log(f"⏳ API rate limit (poging {_api_attempt + 1}/5), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 4:
+                            raise  # Give up after 5 attempts
+
+                if response is None:
+                    raise RuntimeError("API call failed after 5 retries")
 
                 # Process response
                 assistant_content = response.content
@@ -3257,11 +3271,25 @@ Als er GEEN concrete datums/tijden staan, zet schedule_found op false.
 Antwoord ALLEEN met valide JSON."""
 
                 try:
-                    response = self.client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=2000,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
+                    import random as _rnd
+                    response = None
+                    for _api_attempt in range(4):
+                        try:
+                            response = self.client.messages.create(
+                                model="claude-haiku-4-5-20251001",
+                                max_tokens=2000,
+                                messages=[{"role": "user", "content": prompt}]
+                            )
+                            break
+                        except anthropic.RateLimitError:
+                            wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                            self._log(f"    ⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                            await asyncio.sleep(wait)
+                            if _api_attempt == 3:
+                                raise
+
+                    if response is None:
+                        continue  # Skip this PDF
 
                     result_text = response.content[0].text.strip()
                     # Extract JSON

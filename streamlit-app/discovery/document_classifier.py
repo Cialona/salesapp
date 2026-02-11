@@ -1019,11 +1019,28 @@ EXTRACTIE (HEEL BELANGRIJK - zoek naar ALLES):
 Antwoord ALLEEN met valide JSON."""
 
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}]
-            )
+            import random as _rnd
+            response = None
+            for _api_attempt in range(4):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=2000,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    break
+                except Exception as rate_err:
+                    if 'rate_limit' in str(rate_err).lower() or '429' in str(rate_err):
+                        wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                        self.log(f"    ⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 3:
+                            raise
+                    else:
+                        raise
+
+            if response is None:
+                raise RuntimeError("API call failed after retries")
 
             response_text = response.content[0].text.strip()
 
