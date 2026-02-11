@@ -242,21 +242,36 @@ class DocumentClassifier:
             combined = f"{url_lower} {text_lower}"
 
             # Floorplan indicators
-            if any(kw in combined for kw in ['floor', 'plan', 'map', 'hall', 'plattegrond', 'layout', 'venue']):
+            if any(kw in combined for kw in [
+                'floor', 'plan', 'map', 'hall', 'plattegrond', 'layout', 'venue',
+                'gelände', 'gelande', 'gelaende', 'hallen', 'siteplan',
+            ]):
                 candidates['floorplan'].append(pdf)
 
             # Exhibitor manual indicators
-            if any(kw in combined for kw in ['exhibitor', 'manual', 'welcome', 'pack', 'handbook', 'guide', 'exposant']):
+            if any(kw in combined for kw in [
+                'exhibitor', 'manual', 'welcome', 'pack', 'handbook', 'guide', 'exposant',
+                'aussteller', 'handbuch', 'leitfaden', 'service-doc', 'btb',
+                'standhouder', 'standbouwer', 'deelnemer',
+            ]):
                 candidates['exhibitor_manual'].append(pdf)
 
             # Rules/regulations indicators
-            if any(kw in combined for kw in ['technical', 'regulation', 'rule', 'guideline', 'normativ', 'richtlijn', 'provision']):
+            if any(kw in combined for kw in [
+                'technical', 'regulation', 'rule', 'guideline', 'normativ', 'richtlijn', 'provision',
+                'technis', 'richtlini', 'vorschrift', 'standbau', 'construction',
+                'specification', 'safety', 'voorschrift', 'reglement',
+            ]):
                 candidates['rules'].append(pdf)
 
             # Schedule indicators (but not if it's primarily a floorplan document)
             floorplan_words = ['floorplan', 'floor plan', 'floor-plan', 'plattegrond', 'hall plan', 'venue map']
             is_primarily_floorplan = any(fkw in combined for fkw in floorplan_words)
-            if not is_primarily_floorplan and any(kw in combined for kw in ['schedule', 'timing', 'build-up', 'buildup', 'tear-down', 'teardown', 'opbouw', 'afbouw', 'move-in', 'move-out']):
+            if not is_primarily_floorplan and any(kw in combined for kw in [
+                'schedule', 'timing', 'build-up', 'buildup', 'tear-down', 'teardown',
+                'opbouw', 'afbouw', 'move-in', 'move-out', 'dismantl',
+                'aufbau', 'abbau', 'zeitplan', 'termine', 'toegangsbeleid',
+            ]):
                 candidates['schedule'].append(pdf)
 
         # Second pass: Validate best candidates with LLM (STRICT validation)
