@@ -1047,23 +1047,25 @@ class ClaudeAgent:
                     continue
 
             # Second pass: scan discovered pages
-            # Priority order: (1) navigation links from homepage, (2) keyword-matched document pages
-            # Navigation links are highest priority because they represent the site's own structure
-            # and catch pages like "Show Layout", "Exhibiting" that keywords might miss.
+            # Priority order: (1) keyword-matched document pages and external portals,
+            # (2) navigation links from homepage.
+            # Keyword matches and portals are highest priority because they represent
+            # pages we KNOW are relevant (exhibitor docs, external portals like expocad).
+            # Nav links supplement this with the site's own structure.
             second_pass_urls = []
             seen_second_pass = set(urls_to_scan[:20])
 
-            # First add navigation links (highest priority — site's own structure)
-            for nav_url in nav_pages_to_scan:
-                if nav_url not in seen_second_pass:
-                    second_pass_urls.append(nav_url)
-                    seen_second_pass.add(nav_url)
-
-            # Then add keyword-matched document pages
+            # First add keyword-matched document pages and external portals (highest priority)
             for doc_url in found_pages_to_scan:
                 if doc_url not in seen_second_pass:
                     second_pass_urls.append(doc_url)
                     seen_second_pass.add(doc_url)
+
+            # Then add navigation links (site structure, fills remaining slots)
+            for nav_url in nav_pages_to_scan:
+                if nav_url not in seen_second_pass:
+                    second_pass_urls.append(nav_url)
+                    seen_second_pass.add(nav_url)
 
             scanned_in_second_pass = 0
             for url in second_pass_urls[:25]:  # Increased from 15 to 25 for better coverage
@@ -1746,13 +1748,16 @@ class ClaudeAgent:
     async def _web_search_for_portals(self, fair_name: str) -> dict:
         """
         Search the web for exhibitor portals and event manuals.
-        Uses Bing search (primary) with DuckDuckGo as fallback via Playwright.
-        DDG's no-JS endpoint now returns CAPTCHAs to headless browsers,
-        so Bing is the default search engine.
+        Uses Brave Search (primary) via plain HTTP — no Playwright needed.
+        Brave returns server-rendered HTML with real results, unlike Bing
+        (JS-only rendering) and DDG (CAPTCHA blocks headless browsers).
 
         Returns dict with 'pdf_links' and 'portal_urls'.
         """
         import urllib.parse
+        import urllib.request
+        import urllib.error
+        import ssl
 
         found_pdfs = []
         found_portals = []
@@ -1829,7 +1834,7 @@ class ClaudeAgent:
                 url_lower = decoded_url.lower()
 
                 # Skip search engine pages
-                if any(se in host for se in ['bing.com', 'google.', 'duckduckgo', 'yahoo.']):
+                if any(se in host for se in ['bing.com', 'google.', 'duckduckgo', 'yahoo.', 'brave.com']):
                     return False
 
                 # Domain whitelist (portals, CDNs)
@@ -1866,176 +1871,120 @@ class ClaudeAgent:
             except Exception:
                 pass
 
-        # Launch a Playwright browser for web searches
-        from playwright.async_api import async_playwright as _async_pw
-        _pw = None
-        _search_browser = None
-        try:
-            _pw = await _async_pw().start()
-            _search_browser = await _pw.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
-            )
-        except Exception as e:
-            self._log(f"    ⚠️ Could not launch search browser: {e}")
-            if _search_browser:
-                await _search_browser.close()
-            if _pw:
-                await _pw.stop()
-            return {'pdf_links': [], 'portal_urls': []}
+        # === PRIMARY: Brave Search via plain HTTP (no Playwright needed) ===
+        # Brave returns server-rendered HTML with real search results.
+        # Unlike Bing (JS-only) and DDG (CAPTCHA), Brave works reliably.
+        ssl_ctx = ssl.create_default_context()
+        brave_worked = False
 
-        try:
-            # === PRIMARY: Bing search (reliable, no CAPTCHA for basic queries) ===
-            bing_context = await _search_browser.new_context(
-                viewport={'width': 1024, 'height': 768},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            )
-            bing_page = await bing_context.new_page()
-            bing_worked = False
+        for qi, query in enumerate(search_queries[:4]):
+            try:
+                self._log(f"    🔍 Brave search: '{query}'")
+                encoded_query = urllib.parse.quote_plus(query)
+                search_url = f"https://search.brave.com/search?q={encoded_query}"
 
-            for qi, query in enumerate(search_queries[:4]):
-                try:
-                    self._log(f"    🔍 Bing search: '{query}'")
-                    encoded_query = urllib.parse.quote_plus(query)
-                    search_url = f"https://www.bing.com/search?q={encoded_query}&count=20"
+                req = urllib.request.Request(search_url, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                })
 
+                html = None
+                for attempt in range(3):
                     try:
-                        await bing_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
-                        await asyncio.sleep(1)  # Let results render
-                        html = await bing_page.content()
+                        resp = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
+                        html = resp.read().decode('utf-8', errors='ignore')
+                        break
+                    except urllib.error.HTTPError as e:
+                        if e.code == 429 and attempt < 2:
+                            wait = 2 * (attempt + 1)
+                            self._log(f"    ⏳ Rate limited, waiting {wait}s...")
+                            await asyncio.sleep(wait)
+                            continue
+                        self._log(f"    Brave search error: {e}")
+                        break
                     except Exception as e:
-                        self._log(f"    Bing search error: {e}")
-                        continue
-
-                    if not html or len(html) < 1000:
-                        continue
-
-                    # Check for Bing CAPTCHA
-                    if 'captcha' in html.lower() or 'unusual traffic' in html.lower():
-                        self._log(f"    ⚠️ Bing CAPTCHA detected, skipping remaining queries")
+                        self._log(f"    Brave search error: {e}")
                         break
 
-                    # Parse Bing results
-                    # Bing uses redirect URLs: /ck/a?...&u=a1{base64_encoded_url}&ntb=1
-                    # Extract the 'u' parameter and decode the base64 URL
-                    bing_urls = []
-
-                    # Method 1: Extract from Bing redirect URLs
-                    bing_redirects = re.findall(r'href="https?://www\.bing\.com/ck/a\?[^"]*?u=([^&"]+)', html)
-                    for encoded_u in bing_redirects:
-                        try:
-                            decoded_u = urllib.parse.unquote(encoded_u)
-                            # Bing encodes with a1 prefix + base64
-                            if decoded_u.startswith('a1'):
-                                url_bytes = base64.b64decode(decoded_u[2:] + '==')
-                                actual_url = url_bytes.decode('utf-8', errors='ignore')
-                                if actual_url.startswith('http'):
-                                    bing_urls.append(actual_url)
-                        except Exception:
-                            continue
-
-                    # Method 2: Extract cite/display URLs (shown below results)
-                    cite_urls = re.findall(r'<cite[^>]*>(?:<span[^>]*>)?([^<]+)', html)
-                    for cite in cite_urls:
-                        cite_clean = re.sub(r'<[^>]+>', '', cite).strip()
-                        if cite_clean.startswith('http'):
-                            bing_urls.append(cite_clean)
-                        elif '.' in cite_clean and '/' in cite_clean:
-                            bing_urls.append(f"https://{cite_clean}")
-
-                    # Method 3: Direct href links to external sites
-                    direct_hrefs = re.findall(r'href="(https?://(?!www\.bing\.com)[^"]+)"', html)
-                    bing_urls.extend(direct_hrefs)
-
-                    # Deduplicate
-                    seen_urls = set()
-                    unique_urls = []
-                    for url in bing_urls:
-                        url_clean = url.split('#')[0].rstrip('/')
-                        if url_clean not in seen_urls:
-                            seen_urls.add(url_clean)
-                            unique_urls.append(url)
-
-                    self._log(f"    Bing returned {len(unique_urls)} unique URLs")
-
-                    for url in unique_urls:
-                        if _is_useful_result(url):
-                            _add_result(url)
-                            bing_worked = True
-
-                except Exception as e:
-                    self._log(f"    Bing search error: {e}")
+                if not html or len(html) < 1000:
                     continue
 
-                if qi < 3:
-                    await asyncio.sleep(1.0)
+                # Parse Brave results: split on snippet blocks
+                # Each <div class="snippet ..."> contains one search result
+                snippet_blocks = html.split('class="snippet ')
+                result_urls = []
+                seen_urls = set()
 
-            await bing_context.close()
+                for block in snippet_blocks[1:]:  # Skip first (before any snippet)
+                    # Extract the first external href from each snippet block
+                    hrefs = re.findall(
+                        r'href="(https?://(?!search\.brave|brave\.com|cdn\.search\.brave)[^"]+)"',
+                        block[:3000]
+                    )
+                    for href in hrefs:
+                        url_clean = href.split('#')[0].rstrip('/')
+                        if url_clean not in seen_urls:
+                            seen_urls.add(url_clean)
+                            result_urls.append(href)
+                            break  # Only first URL per snippet = the result link
 
-            # === FALLBACK: DuckDuckGo (if Bing returned nothing) ===
-            if not bing_worked:
-                self._log(f"    🔄 Bing returned no results, trying DuckDuckGo fallback...")
-                ddg_context = await _search_browser.new_context(
-                    viewport={'width': 800, 'height': 600},
-                    java_script_enabled=False,
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                )
-                ddg_page = await ddg_context.new_page()
+                self._log(f"    Brave returned {len(result_urls)} results")
 
-                for qi, query in enumerate(search_queries[:3]):
+                for url in result_urls:
+                    if _is_useful_result(url):
+                        _add_result(url)
+                        brave_worked = True
+
+            except Exception as e:
+                self._log(f"    Brave search error: {e}")
+                continue
+
+            if qi < 3:
+                await asyncio.sleep(1.5)  # Pause between queries to avoid rate limiting
+
+        # === FALLBACK: DuckDuckGo HTML (if Brave returned nothing) ===
+        if not brave_worked:
+            self._log(f"    🔄 Brave returned no results, trying DuckDuckGo fallback...")
+            for qi, query in enumerate(search_queries[:3]):
+                try:
+                    encoded_query = urllib.parse.quote_plus(query)
+                    search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+
+                    req = urllib.request.Request(search_url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                        'Accept': 'text/html',
+                    })
+
                     try:
-                        encoded_query = urllib.parse.quote_plus(query)
-                        search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-
-                        try:
-                            await ddg_page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
-                            html = await ddg_page.content()
-                        except Exception:
-                            continue
-
-                        if not html:
-                            continue
-
-                        # Check for DDG CAPTCHA
-                        if 'captcha' in html.lower() or 'robot' in html.lower():
-                            self._log(f"    ⚠️ DDG CAPTCHA detected — web search unavailable")
-                            self._sd['warnings'].append('DDG en Bing beide geblokkeerd (CAPTCHA)')
-                            break
-
-                        # Parse DDG results
-                        raw_hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
-                        if not raw_hrefs:
-                            raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
-
-                        for href in raw_hrefs:
-                            uddg_match = re.search(r'uddg=([^&"]+)', href)
-                            if uddg_match:
-                                decoded = urllib.parse.unquote(uddg_match.group(1))
-                            elif href.startswith('http'):
-                                decoded = href
-                            else:
-                                continue
-
-                            decoded = urllib.parse.unquote(decoded)
-                            if _is_useful_result(decoded):
-                                _add_result(decoded)
-
+                        resp = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
+                        html = resp.read().decode('utf-8', errors='ignore')
                     except Exception:
                         continue
 
-                    if qi < 2:
-                        await asyncio.sleep(1.5)
+                    if not html:
+                        continue
 
-                await ddg_context.close()
+                    # Check for DDG CAPTCHA
+                    if 'captcha' in html.lower() or 'robot' in html.lower():
+                        self._log(f"    ⚠️ DDG CAPTCHA detected — web search unavailable")
+                        break
 
-        finally:
-            try:
-                if _search_browser:
-                    await _search_browser.close()
-                if _pw:
-                    await _pw.stop()
-            except Exception:
-                pass
+                    # Parse DDG results
+                    raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+                    for href in raw_hrefs:
+                        try:
+                            decoded = urllib.parse.unquote(urllib.parse.unquote(href))
+                            if decoded.startswith('http') and _is_useful_result(decoded):
+                                _add_result(decoded)
+                        except Exception:
+                            continue
+
+                except Exception:
+                    continue
+
+                if qi < 2:
+                    await asyncio.sleep(1.0)
 
         # Log search results summary
         if found_pdfs:
