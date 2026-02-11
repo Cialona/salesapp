@@ -659,11 +659,14 @@ class BrowserController:
             'hall', 'schedule', 'timeline', 'directory', 'service', 'documentation',
             'set-up', 'dismantl', 'build-up', 'tear-down', 'construction', 'regulation',
             'provision', 'sustainable', 'stand design', 'booth', 'catalogue', 'catalog',
-            'participate', 'preparation', 'planning',
+            'participate', 'preparation', 'planning', 'contractor',
             # German
             'aussteller', 'richtlinie', 'handbuch', 'leitfaden', 'technisch', 'gelände',
             'hallen', 'zeitplan', 'aufbau', 'abbau', 'standbau', 'verzeichnis',
             'verkehr', 'vorschrift', 'termine', 'gelaende', 'messebau',
+            # Dutch
+            'standbouw', 'standbouwer', 'standhouder', 'opbouw', 'afbouw',
+            'toegang', 'voorschrift',
             # Italian (for fairs like Salone del Mobile)
             'espositore', 'espositori', 'regolamento', 'tecnico', 'montaggio', 'smontaggio',
             'allestimento', 'partecipare', 'servizi', 'catalogo', 'padiglione',
@@ -681,7 +684,8 @@ class BrowserController:
         high_value_keywords = [
             'technical', 'regulation', 'provision', 'richtlin', 'regolamento',
             'construction', 'standbau', 'allestimento', 'setup', 'dismant',
-            'montaggio', 'smontaggio', 'aufbau', 'abbau'
+            'montaggio', 'smontaggio', 'aufbau', 'abbau',
+            'contractor', 'standbouw', 'opbouw', 'afbouw',
         ]
         high_value_links = [
             l for l in all_links
