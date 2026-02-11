@@ -222,42 +222,11 @@ class DocumentClassifier:
         fair_keywords = self._extract_fair_keywords(fair_name)
         self.log(f"  Fair keywords for matching: {fair_keywords}")
 
-        # First pass: Quick classification based on URL and filename
-        candidates = {
-            'floorplan': [],
-            'exhibitor_manual': [],
-            'rules': [],
-            'schedule': [],
-        }
-
-        for pdf in pdf_links:
-            url = pdf.get('url', '') if isinstance(pdf, dict) else pdf
-            text = pdf.get('text', '') if isinstance(pdf, dict) else ''
-            pdf_type = pdf.get('type', 'unknown') if isinstance(pdf, dict) else 'unknown'
-            pdf_year = pdf.get('year') if isinstance(pdf, dict) else None
-
-            # Quick URL-based classification
-            url_lower = url.lower()
-            text_lower = text.lower()
-            combined = f"{url_lower} {text_lower}"
-
-            # Floorplan indicators
-            if any(kw in combined for kw in ['floor', 'plan', 'map', 'hall', 'plattegrond', 'layout', 'venue']):
-                candidates['floorplan'].append(pdf)
-
-            # Exhibitor manual indicators
-            if any(kw in combined for kw in ['exhibitor', 'manual', 'welcome', 'pack', 'handbook', 'guide', 'exposant']):
-                candidates['exhibitor_manual'].append(pdf)
-
-            # Rules/regulations indicators
-            if any(kw in combined for kw in ['technical', 'regulation', 'rule', 'guideline', 'normativ', 'richtlijn', 'provision']):
-                candidates['rules'].append(pdf)
-
-            # Schedule indicators (but not if it's primarily a floorplan document)
-            floorplan_words = ['floorplan', 'floor plan', 'floor-plan', 'plattegrond', 'hall plan', 'venue map']
-            is_primarily_floorplan = any(fkw in combined for fkw in floorplan_words)
-            if not is_primarily_floorplan and any(kw in combined for kw in ['schedule', 'timing', 'build-up', 'buildup', 'tear-down', 'teardown', 'opbouw', 'afbouw', 'move-in', 'move-out']):
-                candidates['schedule'].append(pdf)
+        # First pass: LLM-based batch classification
+        # Instead of brittle keyword matching, send all PDF URLs to Haiku in one call.
+        # Haiku understands context (e.g., "btb_en.pdf" = Betriebstechnische Bestimmungen = rules)
+        # and can classify in any language (DE, NL, FR, IT, ES, EN).
+        candidates = await self._llm_batch_classify_pdfs(pdf_links, fair_name, target_year)
 
         # Second pass: Validate best candidates with LLM (STRICT validation)
         for doc_type, pdfs in candidates.items():
@@ -785,6 +754,142 @@ class DocumentClassifier:
 
         return classification
 
+    async def _llm_batch_classify_pdfs(
+        self,
+        pdf_links: List[Dict],
+        fair_name: str,
+        target_year: str,
+    ) -> Dict[str, List[Dict]]:
+        """Use Haiku to classify all PDFs in one call based on URL + link text.
+
+        Returns candidates dict: {doc_type: [pdf_entries]}
+        This replaces brittle keyword matching with LLM understanding.
+        """
+        candidates = {
+            'floorplan': [],
+            'exhibitor_manual': [],
+            'rules': [],
+            'schedule': [],
+        }
+
+        if not pdf_links:
+            return candidates
+
+        # Build PDF list for the prompt (max 60 to keep prompt reasonable)
+        pdf_entries = []
+        for i, pdf in enumerate(pdf_links[:60]):
+            url = pdf.get('url', '') if isinstance(pdf, dict) else pdf
+            text = pdf.get('text', '') if isinstance(pdf, dict) else ''
+            year = pdf.get('year', '') if isinstance(pdf, dict) else ''
+            pdf_entries.append(f"[{i}] URL: {url}\n    Link text: {text or '(geen)'}\n    Year: {year or '?'}")
+
+        pdf_list = "\n".join(pdf_entries)
+
+        prompt = f"""Classificeer deze PDF documenten voor de beurs "{fair_name}" ({target_year}).
+
+DOCUMENTEN:
+{pdf_list}
+
+Classificeer elk document in een van deze categorieën:
+- "floorplan": plattegrond, hallenplan, venue map, site plan, ExpoCad/ExpoFP link
+- "exhibitor_manual": exposanten handleiding, welcome pack, service documentation, exhibitor guide, Betriebstechnische Bestimmungen (BTB)
+- "rules": technische richtlijnen, regulations, construction rules, standbouw regels, Technische Richtlinien, voorschriften
+- "schedule": opbouw/afbouw schema, build-up/tear-down dates, move-in schedule, Aufbau/Abbau
+- "skip": niet relevant (bijv. privacy policy, cookie policy, sponsorship, marketing, visitor info)
+
+Antwoord ALLEEN met valide JSON - een object met document indices per categorie:
+{{
+  "floorplan": [0, 5],
+  "exhibitor_manual": [2, 8],
+  "rules": [3],
+  "schedule": [7],
+  "skip": [1, 4, 6, 9]
+}}
+
+Regels:
+- Een document kan in MEERDERE categorieën voorkomen (bijv. een manual kan ook rules bevatten)
+- Prioriteer {target_year} documenten boven oudere versies
+- Wees RUIM: bij twijfel, classificeer het document liever dan het te skippen
+- ELKE index moet in minstens één categorie voorkomen"""
+
+        try:
+            import random as _rnd
+            response = None
+            for _api_attempt in range(4):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=1000,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    break
+                except Exception as rate_err:
+                    if 'rate_limit' in str(rate_err).lower() or '429' in str(rate_err):
+                        wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                        self.log(f"    ⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 3:
+                            raise
+                    else:
+                        raise
+
+            if response is None:
+                self.log("  ⚠️ LLM batch classification failed — falling back to keyword matching")
+                return self._keyword_classify_pdfs(pdf_links)
+
+            response_text = response.content[0].text.strip()
+
+            # Parse JSON
+            if "```" in response_text:
+                json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
+                if json_match:
+                    response_text = json_match.group(1)
+
+            result = json.loads(response_text)
+
+            # Map indices back to PDF entries
+            for doc_type in ['floorplan', 'exhibitor_manual', 'rules', 'schedule']:
+                indices = result.get(doc_type, [])
+                for idx in indices:
+                    if isinstance(idx, int) and 0 <= idx < len(pdf_links):
+                        candidates[doc_type].append(pdf_links[idx])
+
+            total = sum(len(v) for v in candidates.values())
+            self.log(f"  🤖 LLM classificatie: {total} documents gecategoriseerd "
+                     f"(fp={len(candidates['floorplan'])}, man={len(candidates['exhibitor_manual'])}, "
+                     f"rules={len(candidates['rules'])}, sched={len(candidates['schedule'])})")
+
+            return candidates
+
+        except Exception as e:
+            self.log(f"  ⚠️ LLM batch classification error: {e} — falling back to keyword matching")
+            return self._keyword_classify_pdfs(pdf_links)
+
+    def _keyword_classify_pdfs(self, pdf_links: List[Dict]) -> Dict[str, List[Dict]]:
+        """Fallback: keyword-based classification if LLM batch fails."""
+        candidates = {
+            'floorplan': [],
+            'exhibitor_manual': [],
+            'rules': [],
+            'schedule': [],
+        }
+
+        for pdf in pdf_links:
+            url = pdf.get('url', '') if isinstance(pdf, dict) else pdf
+            text = pdf.get('text', '') if isinstance(pdf, dict) else ''
+            combined = f"{url.lower()} {text.lower()}"
+
+            if any(kw in combined for kw in ['floor', 'plan', 'map', 'hall', 'plattegrond', 'layout', 'hallen']):
+                candidates['floorplan'].append(pdf)
+            if any(kw in combined for kw in ['exhibitor', 'manual', 'welcome', 'handbook', 'guide', 'aussteller', 'btb']):
+                candidates['exhibitor_manual'].append(pdf)
+            if any(kw in combined for kw in ['technical', 'regulation', 'rule', 'guideline', 'richtlini', 'vorschrift', 'technis']):
+                candidates['rules'].append(pdf)
+            if any(kw in combined for kw in ['schedule', 'timing', 'build-up', 'tear-down', 'aufbau', 'abbau', 'opbouw', 'afbouw']):
+                candidates['schedule'].append(pdf)
+
+        return candidates
+
     async def _validate_pdf_strict(
         self,
         url: str,
@@ -1019,11 +1124,28 @@ EXTRACTIE (HEEL BELANGRIJK - zoek naar ALLES):
 Antwoord ALLEEN met valide JSON."""
 
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}]
-            )
+            import random as _rnd
+            response = None
+            for _api_attempt in range(4):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=2000,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    break
+                except Exception as rate_err:
+                    if 'rate_limit' in str(rate_err).lower() or '429' in str(rate_err):
+                        wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                        self.log(f"    ⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 3:
+                            raise
+                    else:
+                        raise
+
+            if response is None:
+                raise RuntimeError("API call failed after retries")
 
             response_text = response.content[0].text.strip()
 

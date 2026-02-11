@@ -290,11 +290,29 @@ If not found: {{"url": null, "confidence": "low", "notes": "..."}}
 Return ONLY JSON, no other text."""
 
         try:
-            resp = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            import random as _rnd
+            resp = None
+            for _api_attempt in range(4):
+                try:
+                    resp = client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=500,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    break
+                except Exception as rate_err:
+                    if 'rate_limit' in str(rate_err).lower() or '429' in str(rate_err):
+                        wait = (2 ** _api_attempt) * 5 + _rnd.uniform(0, 3)
+                        _add_log(job, f"⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 3:
+                            raise
+                    else:
+                        raise
+
+            if resp is None:
+                break
+
             text = resp.content[0].text.strip()
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0].strip()

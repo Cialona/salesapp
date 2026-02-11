@@ -2609,46 +2609,60 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 - Bij twijfel: "NIET GEVONDEN" is beter dan een verkeerd document accepteren"""}],
                     })
 
-                # Call Claude with computer use (dynamic prompt when classification available)
-                response = self.client.beta.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=4096,
-                    system=active_system_prompt,
-                    betas=["computer-use-2025-01-24"],
-                    tools=[
-                        {
-                            "type": "computer_20250124",
-                            "name": "computer",
-                            "display_width_px": screenshot.width,
-                            "display_height_px": screenshot.height,
-                            "display_number": 1,
-                        },
-                        {
-                            "name": "goto_url",
-                            "description": "Navigate directly to a URL. Use this to visit PDF links you see in the extracted links, or to check exhibitor directory subdomains like exhibitors.bauma.de",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {
-                                    "url": {
-                                        "type": "string",
-                                        "description": "The full URL to navigate to",
+                # Call Claude with computer use (with retry on rate limit)
+                import random as _rnd
+                response = None
+                for _api_attempt in range(5):
+                    try:
+                        response = self.client.beta.messages.create(
+                            model="claude-sonnet-4-20250514",
+                            max_tokens=4096,
+                            system=active_system_prompt,
+                            betas=["computer-use-2025-01-24"],
+                            tools=[
+                                {
+                                    "type": "computer_20250124",
+                                    "name": "computer",
+                                    "display_width_px": screenshot.width,
+                                    "display_height_px": screenshot.height,
+                                    "display_number": 1,
+                                },
+                                {
+                                    "name": "goto_url",
+                                    "description": "Navigate directly to a URL. Use this to visit PDF links you see in the extracted links, or to check exhibitor directory subdomains like exhibitors.bauma.de",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "url": {
+                                                "type": "string",
+                                                "description": "The full URL to navigate to",
+                                            },
+                                        },
+                                        "required": ["url"],
                                     },
                                 },
-                                "required": ["url"],
-                            },
-                        },
-                        {
-                            "name": "deep_scan",
-                            "description": "Perform a deep scan of the current page to find ALL document links. This expands all accordions, dropdowns, and hidden sections, then extracts every PDF and document link. Use this when you suspect there are hidden documents on the page.",
-                            "input_schema": {
-                                "type": "object",
-                                "properties": {},
-                                "required": [],
-                            },
-                        },
-                    ],
-                    messages=messages,
-                )
+                                {
+                                    "name": "deep_scan",
+                                    "description": "Perform a deep scan of the current page to find ALL document links. This expands all accordions, dropdowns, and hidden sections, then extracts every PDF and document link. Use this when you suspect there are hidden documents on the page.",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {},
+                                        "required": [],
+                                    },
+                                },
+                            ],
+                            messages=messages,
+                        )
+                        break  # Success
+                    except anthropic.RateLimitError as e:
+                        wait = (2 ** _api_attempt) * 5 + _rnd.uniform(0, 3)  # 5s, 13s, 23s, 43s, 83s
+                        self._log(f"⏳ API rate limit (poging {_api_attempt + 1}/5), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 4:
+                            raise  # Give up after 5 attempts
+
+                if response is None:
+                    raise RuntimeError("API call failed after 5 retries")
 
                 # Process response
                 assistant_content = response.content
@@ -2819,6 +2833,20 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
             output.debug.notes.append(f"Agent completed in {iteration} iterations")
             output.debug.notes.append(f"Auto-mapped {len(downloads)} downloaded files to output fields")
             output.debug.notes.append(f"Total time: {int(time.time() - start_time)}s")
+
+            # Post-scan: extract schedule data from browser-downloaded PDFs
+            # The auto-map only checks filenames. This reads the actual PDF content
+            # to find schedule entries that might be embedded in manuals/rules docs.
+            already_classified_urls = set()
+            if classification_result:
+                for dtype in ['floorplan', 'exhibitor_manual', 'rules', 'schedule']:
+                    doc = getattr(classification_result, dtype, None)
+                    if doc and hasattr(doc, 'url') and doc.url:
+                        already_classified_urls.add(doc.url)
+
+            await self._post_scan_browser_pdfs(
+                downloads, output, input_data, already_classified_urls
+            )
 
             # Attach the full discovery log for troubleshooting
             self._log("")
@@ -3147,6 +3175,173 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
 
         if is_schedule and not output.documents.schedule_page_url:
             output.documents.schedule_page_url = url
+
+    async def _post_scan_browser_pdfs(
+        self,
+        downloads: list,
+        output: DiscoveryOutput,
+        input_data: 'TestCaseInput',
+        already_classified_urls: set,
+    ) -> None:
+        """Scan browser-downloaded PDFs for schedule data that auto-map misses.
+
+        During pre-scan classification, PDFs are fully analyzed with LLM for
+        content extraction (schedule entries, contacts, cross-type detection).
+        But PDFs downloaded by the browser agent are only auto-mapped by filename.
+        This method fills that gap: it reads each unscanned PDF locally, checks
+        for schedule keywords, and if found, uses Haiku to extract dates/times.
+        """
+        try:
+            import pypdf
+        except ImportError:
+            self._log("⚠️ pypdf not available — skipping post-scan of browser PDFs")
+            return
+
+        fair_name = input_data.fair_name
+        year_match = re.search(r'20\d{2}', fair_name)
+        target_year = year_match.group(0) if year_match else "2026"
+
+        schedule_keywords = [
+            'build-up', 'buildup', 'set-up', 'setup', 'move-in', 'move in',
+            'tear-down', 'teardown', 'dismantling', 'move-out', 'move out',
+            'aufbau', 'abbau', 'opbouw', 'afbouw',
+            'montage', 'démontage', 'schedule', 'timetable', 'zeitplan',
+        ]
+
+        pdfs_scanned = 0
+        for download in downloads:
+            if not download.filename.lower().endswith('.pdf'):
+                continue
+            if download.original_url in already_classified_urls:
+                continue
+            if not download.local_path:
+                continue
+
+            try:
+                import io
+                with open(download.local_path, 'rb') as f:
+                    reader = pypdf.PdfReader(f)
+                    text_parts = []
+                    for page in reader.pages[:15]:
+                        try:
+                            text = page.extract_text()
+                            if text:
+                                text_parts.append(text)
+                        except Exception:
+                            continue
+
+                pdf_text = "\n".join(text_parts)
+                if len(pdf_text) < 100:
+                    continue
+
+                text_lower = pdf_text.lower()
+                if not any(kw in text_lower for kw in schedule_keywords):
+                    continue
+
+                pdfs_scanned += 1
+                self._log(f"📄 Post-scan: {download.filename} bevat schedule keywords — extracting...")
+
+                # Use Haiku to extract schedule entries
+                prompt = f"""Extraheer het opbouw- en afbouwschema uit dit document.
+
+BEURS: {fair_name}
+JAAR: {target_year}
+DOCUMENT: {download.original_url}
+
+TEKST:
+---
+{pdf_text[:8000]}
+---
+
+Zoek naar ALLE opbouw (build-up/set-up/move-in) en afbouw (tear-down/dismantling/move-out) datums en tijden.
+Maak voor ELKE rij/dag een apart entry. Als er per standgrootte verschillende datums zijn, maak dan per standgrootte een apart entry.
+
+Antwoord ALLEEN met valide JSON:
+{{
+  "schedule_found": true/false,
+  "build_up": [
+    {{"date": "YYYY-MM-DD", "time": "HH:MM-HH:MM", "description": "korte beschrijving"}}
+  ],
+  "tear_down": [
+    {{"date": "YYYY-MM-DD", "time": "HH:MM-HH:MM", "description": "korte beschrijving"}}
+  ]
+}}
+
+Als er GEEN concrete datums/tijden staan, zet schedule_found op false.
+Antwoord ALLEEN met valide JSON."""
+
+                try:
+                    import random as _rnd
+                    response = None
+                    for _api_attempt in range(4):
+                        try:
+                            response = self.client.messages.create(
+                                model="claude-haiku-4-5-20251001",
+                                max_tokens=2000,
+                                messages=[{"role": "user", "content": prompt}]
+                            )
+                            break
+                        except anthropic.RateLimitError:
+                            wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                            self._log(f"    ⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                            await asyncio.sleep(wait)
+                            if _api_attempt == 3:
+                                raise
+
+                    if response is None:
+                        continue  # Skip this PDF
+
+                    result_text = response.content[0].text.strip()
+                    # Extract JSON
+                    json_match = re.search(r'\{[\s\S]*\}', result_text)
+                    if json_match:
+                        result = json.loads(json_match.group(0))
+
+                        if result.get('schedule_found'):
+                            # Merge with deduplication
+                            seen_build_up = {(e.date, e.time) for e in output.schedule.build_up}
+                            for entry in result.get('build_up', []):
+                                if entry.get('date'):
+                                    dedup_key = (entry.get('date'), entry.get('time', ''))
+                                    if dedup_key not in seen_build_up:
+                                        seen_build_up.add(dedup_key)
+                                        output.schedule.build_up.append(ScheduleEntry(
+                                            date=entry.get('date'),
+                                            time=entry.get('time', ''),
+                                            description=entry.get('description', 'Build-up'),
+                                            source_url=download.original_url
+                                        ))
+
+                            seen_tear_down = {(e.date, e.time) for e in output.schedule.tear_down}
+                            for entry in result.get('tear_down', []):
+                                if entry.get('date'):
+                                    dedup_key = (entry.get('date'), entry.get('time', ''))
+                                    if dedup_key not in seen_tear_down:
+                                        seen_tear_down.add(dedup_key)
+                                        output.schedule.tear_down.append(ScheduleEntry(
+                                            date=entry.get('date'),
+                                            time=entry.get('time', ''),
+                                            description=entry.get('description', 'Tear-down'),
+                                            source_url=download.original_url
+                                        ))
+
+                            bu = len(result.get('build_up', []))
+                            td = len(result.get('tear_down', []))
+                            self._log(f"    📅 Extracted {bu} build-up + {td} tear-down entries from {download.filename}")
+
+                            if output.schedule.build_up or output.schedule.tear_down:
+                                output.quality.schedule = "strong"
+                                if not output.primary_reasoning.schedule or output.primary_reasoning.schedule == "missing":
+                                    output.primary_reasoning.schedule = f"Post-scan: schedule extracted from {download.filename}"
+
+                except Exception as e:
+                    self._log(f"    ⚠️ LLM extraction error: {e}")
+
+            except Exception as e:
+                self._log(f"⚠️ Post-scan error for {download.filename}: {e}")
+
+        if pdfs_scanned > 0:
+            self._log(f"📄 Post-scan: {pdfs_scanned} browser-downloaded PDFs gescand voor schedule data")
 
     def _parse_result(self, text: str, output: DiscoveryOutput) -> None:
         """Parse the final JSON result from Claude."""
