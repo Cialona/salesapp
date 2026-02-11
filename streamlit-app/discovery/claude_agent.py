@@ -1290,6 +1290,9 @@ class ClaudeAgent:
                 # content: rules, schedules, manuals. Prioritize them.
                 if 'oem' in path:
                     score += 8
+                # ExpoCad portals are floorplan-specific — always valuable
+                if 'expocad' in host:
+                    score += 7
                 # Salesforce community portals with /s/ paths are interactive portals
                 if '/s/' in path and 'my.site.com' in host:
                     score += 3
@@ -1338,7 +1341,7 @@ class ClaudeAgent:
         try:
             await scan_browser.launch()
 
-            for portal_url in portal_urls[:5]:  # Max 5 portals (OEM portals need priority)
+            for portal_url in portal_urls[:8]:  # Max 8 portals (web search can find many)
                 try:
                     self._log(f"  🌐 Scanning portal: {portal_url}")
                     await scan_browser.goto(portal_url)
@@ -1877,7 +1880,13 @@ class ClaudeAgent:
         ssl_ctx = ssl.create_default_context()
         brave_worked = False
 
-        for qi, query in enumerate(search_queries[:4]):
+        # Random initial delay (0-4s) to spread out requests when multiple
+        # fairs are discovered concurrently (prevents Brave 429 rate limiting)
+        import random
+        initial_delay = random.uniform(0.5, 4.0)
+        await asyncio.sleep(initial_delay)
+
+        for qi, query in enumerate(search_queries[:3]):  # 3 queries (4th is too generic)
             try:
                 self._log(f"    🔍 Brave search: '{query}'")
                 encoded_query = urllib.parse.quote_plus(query)
@@ -1897,8 +1906,8 @@ class ClaudeAgent:
                         break
                     except urllib.error.HTTPError as e:
                         if e.code == 429 and attempt < 2:
-                            wait = 2 * (attempt + 1)
-                            self._log(f"    ⏳ Rate limited, waiting {wait}s...")
+                            wait = 3 + 4 * attempt + random.uniform(0, 2)  # ~3s, ~7s, ~11s
+                            self._log(f"    ⏳ Rate limited, waiting {wait:.0f}s...")
                             await asyncio.sleep(wait)
                             continue
                         self._log(f"    Brave search error: {e}")
@@ -1940,8 +1949,8 @@ class ClaudeAgent:
                 self._log(f"    Brave search error: {e}")
                 continue
 
-            if qi < 3:
-                await asyncio.sleep(1.5)  # Pause between queries to avoid rate limiting
+            if qi < 2:
+                await asyncio.sleep(2.0 + random.uniform(0, 1.5))  # 2-3.5s between queries
 
         # === FALLBACK: DuckDuckGo HTML (if Brave returned nothing) ===
         if not brave_worked:
