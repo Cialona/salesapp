@@ -667,6 +667,9 @@ class ClaudeAgent:
             # Dutch
             '/nl/exposanten', '/exposanten', '/nl/deelnemen', '/deelnemen',
             '/nl/diensten', '/nl/downloads',
+            '/standhouders', '/standbouwers', '/standhouders/standbouwers',
+            '/nl/standhouders', '/nl/standbouwers',
+            '/deelnemers', '/nl/deelnemers',
             # Italian
             '/espositori', '/it/espositori', '/partecipare', '/it/partecipare',
         ]
@@ -812,7 +815,7 @@ class ClaudeAgent:
                                 ])
                                 if not is_not_floorplan:
                                     doc_type = 'floorplan'
-                            elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar', 'abbau', 'dismant']):
+                            elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'calendar', 'abbau', 'dismant', 'opbouw', 'afbouw']):
                                 doc_type = 'schedule'
 
                             results['pdf_links'].append({
@@ -1140,7 +1143,7 @@ class ClaudeAgent:
                                 ])
                                 if not is_not_floorplan:
                                     doc_type = 'floorplan'
-                            elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio']):
+                            elif any(kw in lower_url or kw in lower_text for kw in ['schedule', 'timeline', 'aufbau', 'montaggio', 'abbau', 'dismant', 'opbouw', 'afbouw']):
                                 doc_type = 'schedule'
 
                             results['pdf_links'].append({
@@ -1607,7 +1610,8 @@ class ClaudeAgent:
             'setup-schedule', '/deadline', 'access-policy', 'timetable',
             'important-dates', 'important dates', 'key-dates', 'key dates',
             'move-in-move-out', 'move-in schedule',
-            'aufbau-und-abbau', 'opbouw-en-afbouw',
+            'aufbau-und-abbau', 'opbouw-en-afbouw', 'op-en-afbouw',
+            'toegangsbeleid', 'opbouw', 'afbouw',
         ]):
             return 'schedule'
 
