@@ -27,6 +27,7 @@ from .document_classifier import DocumentClassifier, ClassificationResult
 # Each discovery runs in its own thread (see job_manager.py), so a threading.Lock
 # serializes Brave requests across concurrent discoveries, preventing 429 rate limits.
 _brave_search_lock = threading.Lock()
+_brave_last_release_time = 0.0  # epoch timestamp of last lock release
 
 SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 99% van de gevraagde informatie te vinden.
 
@@ -1896,6 +1897,14 @@ class ClaudeAgent:
         _brave_search_lock.acquire()
         self._log(f"    🔓 Brave Search slot verkregen")
         try:
+            # Cooldown: wait if another discovery just finished its Brave queries.
+            # Without this, Brave blocks the IP after ~5-6 rapid queries.
+            global _brave_last_release_time
+            elapsed = time.time() - _brave_last_release_time
+            if _brave_last_release_time > 0 and elapsed < 12:
+                cooldown = 12 - elapsed
+                self._log(f"    ⏳ Brave cooldown: {cooldown:.0f}s (vorige zoekopdracht {elapsed:.0f}s geleden)")
+                await asyncio.sleep(cooldown)
             for qi, query in enumerate(search_queries[:3]):  # 3 queries (4th is too generic)
                 try:
                     self._log(f"    🔍 Brave search: '{query}'")
@@ -1962,6 +1971,7 @@ class ClaudeAgent:
                 if qi < 2:
                     await asyncio.sleep(1.0 + random.uniform(0, 0.5))  # 1-1.5s between queries (no competition)
         finally:
+            _brave_last_release_time = time.time()
             _brave_search_lock.release()
             self._log(f"    🔓 Brave Search slot vrijgegeven")
 
