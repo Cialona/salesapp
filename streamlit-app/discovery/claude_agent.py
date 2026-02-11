@@ -2536,20 +2536,9 @@ Vind informatie voor de beurs: {input_data.fair_name}
 {'BELANGRIJK: De pre-scan heeft al documenten gevonden! Gebruik goto_url om ze te valideren.' if pre_scan_results and pre_scan_results['pdf_links'] and not classification_result else 'Navigeer door de website en vind alle gevraagde documenten.'}
 """
 
-            # Smart iteration limits based on how many documents are missing
-            if classification_result:
-                n_missing = len(classification_result.missing_types)
-                if n_missing <= 1:
-                    effective_max_iterations = 10
-                elif n_missing <= 2:
-                    effective_max_iterations = 15
-                elif n_missing <= 3:
-                    effective_max_iterations = 20
-                else:
-                    effective_max_iterations = 25  # Reduced from 40
-                self._log(f"📉 Iteratie-limiet: {effective_max_iterations} (voor {n_missing} missende documenten)")
-            else:
-                effective_max_iterations = self.max_iterations
+            # Always give the agent the full iteration budget.
+            # The agent needs iterations to explore the website before finding documents.
+            effective_max_iterations = self.max_iterations
 
             # Get initial screenshot
             screenshot = await self.browser.screenshot()
