@@ -710,10 +710,15 @@ class ClaudeAgent:
             'handbook', 'richtlin', 'regolamento', 'standbau', 'construction',
             'setup', 'dismant', 'aufbau', 'abbau', 'montaggio', 'allestimento',
             'floor', 'plan', 'hall', 'gelaende', 'exhibitor', 'aussteller',
+            # Dutch terms
+            'standbouw', 'standhouder', 'opbouw', 'afbouw', 'toegang',
+            # English: contractor pages (stand builders, EAC info)
+            'contractor',
         ]
 
         found_pages_to_scan = []  # Pages found that we should also scan
         nav_pages_to_scan = []   # Navigation links from homepage (highest priority)
+        unmatched_internal_links = []  # Internal links not matched by keywords — for LLM classification
 
         # Create a lightweight browser for pre-scanning
         pre_scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)  # Smaller viewport for speed
@@ -919,6 +924,10 @@ class ClaudeAgent:
                                 'build-up', 'build up', 'dismant', 'tear-down', 'tear down',
                                 'rules and regulations', 'exhibitor resource', 'exhibitor service',
                                 'standbau', 'aufbau', 'abbau', 'montaggio', 'allestimento',
+                                # Dutch: stand builder / setup-teardown
+                                'standbouw', 'standbouwer', 'opbouw', 'afbouw', 'op en afbouw',
+                                # English: contractor info
+                                'contractor',
                             ]
 
                             text_has_high_value = any(kw in link_text_lower for kw in high_value_keywords)
@@ -929,7 +938,8 @@ class ClaudeAgent:
                             text_suggests_portal = any(kw in link_text_lower for kw in [
                                 'exhibitor portal', 'exhibitor service', 'for exhibitors',
                                 'booth', 'stand design', 'technical', 'regulations',
-                                'client portal', 'participant portal', 'vendor portal'
+                                'client portal', 'participant portal', 'vendor portal',
+                                'contractor', 'standbouwer', 'standhouder',
                             ])
 
                             # Determine if we should follow this link
@@ -1026,6 +1036,11 @@ class ClaudeAgent:
                             '/esporre', '/exhibit', '/partecipa',
                             'deadline', 'floorplan', 'floor-plan',
                             'general-regulation', 'voorschrift', 'standbouw',
+                            # Dutch: stand builder pages, setup/teardown schedules
+                            'standhouder', 'standbouwer', 'opbouw', 'afbouw',
+                            'op-en-afbouw', 'toegangsbeleid',
+                            # English: contractor / EAC pages
+                            'contractor',
                         ])
 
                         if url_has_keyword or text_has_keyword or is_document_page:
@@ -1050,10 +1065,52 @@ class ClaudeAgent:
                                 if is_related_domain and link.url not in urls_to_scan:
                                     found_pages_to_scan.append(link.url)
                                     self._log(f"    🔗 Found document page: {link.text[:30] if link.text else link.url[:40]}...")
+                        else:
+                            # Collect unmatched INTERNAL links for LLM classification later.
+                            # Only same-domain links with meaningful text, to avoid noise.
+                            link_host = urlparse(link.url).netloc.lower()
+                            is_same_domain = (base_netloc.lower() in link_host)
+                            has_meaningful_text = lower_text and len(lower_text) >= 3
+                            if (is_same_domain and has_meaningful_text
+                                    and link.url not in results['exhibitor_pages']
+                                    and link.url not in [u for u in found_pages_to_scan]):
+                                unmatched_internal_links.append({
+                                    'url': link.url,
+                                    'text': link.text[:80] if link.text else '',
+                                })
 
                 except Exception as e:
                     # Silently skip failed URLs
                     continue
+
+            # === LLM safety net: classify unmatched internal links ===
+            # Keywords are fast but brittle. Send remaining internal links to Haiku
+            # in a single batch to catch pages in any language/terminology.
+            if unmatched_internal_links:
+                # Deduplicate
+                seen_unmatched = set()
+                unique_unmatched = []
+                for lnk in unmatched_internal_links:
+                    canon = lnk['url'].split('#')[0].rstrip('/')
+                    if canon not in seen_unmatched:
+                        seen_unmatched.add(canon)
+                        unique_unmatched.append(lnk)
+
+                # Only classify if there are candidates and not too many
+                if 1 <= len(unique_unmatched) <= 120:
+                    try:
+                        llm_found = await self._llm_classify_prescan_links(
+                            unique_unmatched, fair_name=fair_name
+                        )
+                        for llm_url in llm_found:
+                            if llm_url not in [u for u in found_pages_to_scan]:
+                                found_pages_to_scan.append(llm_url)
+                                if llm_url not in results['exhibitor_pages']:
+                                    results['exhibitor_pages'].append(llm_url)
+                        if llm_found:
+                            self._log(f"    🤖 LLM classified {len(llm_found)} extra relevant page(s) from {len(unique_unmatched)} candidates")
+                    except Exception as e:
+                        self._log(f"    ⚠️ LLM link classification failed: {e}")
 
             # Second pass: scan discovered pages
             # Priority order: (1) keyword-matched document pages and external portals,
@@ -1178,6 +1235,15 @@ class ClaudeAgent:
                                 })
                                 year_info = f" [{doc_year}]" if doc_year else ""
                                 self._log(f"    ⭐ High-value{year_info} (2nd): {link.text[:40]}...")
+
+                    # Also discover internal doc-type pages in second pass
+                    # (e.g., /standhouders/standbouwers links to /toegangsbeleid-op-en-afbouw)
+                    for link in relevant_links.get('exhibitor_links', []):
+                        if link.url not in results['exhibitor_pages'] and not link.url.lower().endswith('.pdf'):
+                            link_host = urlparse(link.url).netloc.lower()
+                            if base_netloc.lower() in link_host:
+                                results['exhibitor_pages'].append(link.url)
+                                self._log(f"    🔗 Found exhibitor page (2nd pass): {link.text[:30] if link.text else link.url[:40]}...")
 
                 except Exception:
                     continue
@@ -1344,6 +1410,10 @@ class ClaudeAgent:
             'service', 'documentation', 'resource',
             # Floor plan
             'floor plan', 'floorplan', 'hall plan', 'map', 'layout', 'venue',
+            # Dutch: stand builders, setup/teardown, access policy
+            'standbouw', 'standbouwer', 'standhouder', 'toegang',
+            # English: contractor pages
+            'contractor',
         ]
 
         scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
@@ -1430,6 +1500,27 @@ class ClaudeAgent:
                             keyword_links.append(link)
                         else:
                             other_links.append(link)
+
+                    # LLM safety net: classify other_links that keywords missed
+                    if other_links:
+                        try:
+                            other_for_llm = [
+                                {'url': l.url, 'text': (l.text or '')[:80]}
+                                for l in other_links[:60]
+                                if l.text and len(l.text.strip()) >= 3
+                            ]
+                            if other_for_llm:
+                                llm_promoted = await self._llm_classify_prescan_links(
+                                    other_for_llm, fair_name=fair_name
+                                )
+                                llm_promoted_set = set(llm_promoted)
+                                promoted = [l for l in other_links if l.url in llm_promoted_set]
+                                other_links = [l for l in other_links if l.url not in llm_promoted_set]
+                                keyword_links.extend(promoted)
+                                if promoted:
+                                    self._log(f"      🤖 LLM promoted {len(promoted)} portal link(s)")
+                        except Exception:
+                            pass  # Fall back to keyword-only sorting
 
                     # Follow keyword links first (up to 8), then remaining nav links (up to 4 more)
                     links_to_follow = keyword_links[:8] + other_links[:4]
@@ -1582,6 +1673,86 @@ class ClaudeAgent:
             await scan_browser.close()
 
         return portal_pages
+
+    async def _llm_classify_prescan_links(
+        self,
+        links: list,
+        fair_name: str = '',
+    ) -> list:
+        """Use Haiku to classify which unmatched links are relevant for exhibitor research.
+
+        This acts as a safety net after keyword filtering: any link that keywords
+        missed but that an LLM recognises as relevant (in any language) gets included.
+        Sends all links in ONE batch call to keep cost/latency low.
+
+        Returns a list of URLs that should be followed.
+        """
+        if not links:
+            return []
+
+        # Build a compact numbered list for the prompt
+        link_list_str = "\n".join(
+            f"{i+1}. [{l['text']}] -> {l['url']}"
+            for i, l in enumerate(links[:120])
+        )
+
+        prompt = f"""You are helping discover exhibitor documentation for the trade fair "{fair_name}".
+
+Below is a list of internal website links (link text + URL). For each link, decide whether it
+is likely to lead to a page with useful exhibitor documentation such as:
+- Exhibitor manuals, handbooks, welcome packs
+- Technical regulations, rules, guidelines, stand build regulations
+- Setup/teardown (build-up/dismantling) schedules or access policies
+- Contractor / stand builder information (EAC, appointed contractors)
+- Floor plans, hall plans, venue maps
+- Exhibitor services, logistics, sustainability guidelines
+- Important deadlines for exhibitors
+
+This can be in ANY language (English, Dutch, German, French, Italian, Spanish, etc.).
+
+Links:
+{link_list_str}
+
+Reply with ONLY a JSON array of the link numbers that are relevant. Example: [3, 7, 12]
+If none are relevant, reply with: []"""
+
+        try:
+            import random as _rnd
+            response = None
+            for _api_attempt in range(3):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=500,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    break
+                except anthropic.RateLimitError:
+                    wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                    self._log(f"    ⏳ LLM link classification rate limit (attempt {_api_attempt+1}/3), waiting {wait:.0f}s...")
+                    await asyncio.sleep(wait)
+                    if _api_attempt == 2:
+                        raise
+
+            if not response:
+                return []
+
+            result_text = response.content[0].text.strip()
+            # Extract JSON array
+            json_match = re.search(r'\[[\d\s,]*\]', result_text)
+            if not json_match:
+                return []
+
+            indices = json.loads(json_match.group(0))
+            relevant_urls = []
+            for idx in indices:
+                if isinstance(idx, int) and 1 <= idx <= len(links):
+                    relevant_urls.append(links[idx - 1]['url'])
+            return relevant_urls
+
+        except Exception as e:
+            self._log(f"    ⚠️ LLM link classification error: {e}")
+            return []
 
     def _detect_page_type(self, url: str, link_text: str, page_text: str) -> str:
         """Detect the document type of a web page based on URL, title, and content.
@@ -1836,6 +2007,8 @@ class ClaudeAgent:
             'stand-build', 'welcome-pack', 'welcomepack',
             'technical-regulation', 'technical-guideline',
             'contractor', 'stand-information', 'exhibiting',
+            # Dutch: stand builder / setup-teardown pages
+            'standbouw', 'standhouder', 'opbouw', 'afbouw',
         ]
 
         def _is_useful_result(decoded_url: str) -> bool:
