@@ -8,6 +8,7 @@ import base64
 import json
 import re
 import socket
+import threading
 import time
 from typing import Optional, List, Dict, Any, Callable
 from urllib.parse import urlparse, urljoin
@@ -22,6 +23,10 @@ from .schemas import (
 )
 from .document_classifier import DocumentClassifier, ClassificationResult
 
+# Module-level lock: ensures only one discovery does Brave Search at a time.
+# Each discovery runs in its own thread (see job_manager.py), so a threading.Lock
+# serializes Brave requests across concurrent discoveries, preventing 429 rate limits.
+_brave_search_lock = threading.Lock()
 
 SYSTEM_PROMPT = """Je bent een expert onderzoeksagent die exhibitor documenten vindt op beurs websites. Je doel is om 99% van de gevraagde informatie te vinden.
 
@@ -1879,78 +1884,82 @@ class ClaudeAgent:
         # Unlike Bing (JS-only) and DDG (CAPTCHA), Brave works reliably.
         ssl_ctx = ssl.create_default_context()
         brave_worked = False
-
-        # Random initial delay (0-4s) to spread out requests when multiple
-        # fairs are discovered concurrently (prevents Brave 429 rate limiting)
         import random
-        initial_delay = random.uniform(0.5, 4.0)
-        await asyncio.sleep(initial_delay)
 
-        for qi, query in enumerate(search_queries[:3]):  # 3 queries (4th is too generic)
-            try:
-                self._log(f"    🔍 Brave search: '{query}'")
-                encoded_query = urllib.parse.quote_plus(query)
-                search_url = f"https://search.brave.com/search?q={encoded_query}"
+        # Acquire lock so only one discovery does Brave searches at a time.
+        # Other discoveries wait here until the current one finishes its queries.
+        self._log(f"    🔒 Wachten op Brave Search slot...")
+        _brave_search_lock.acquire()
+        self._log(f"    🔓 Brave Search slot verkregen")
+        try:
+            for qi, query in enumerate(search_queries[:3]):  # 3 queries (4th is too generic)
+                try:
+                    self._log(f"    🔍 Brave search: '{query}'")
+                    encoded_query = urllib.parse.quote_plus(query)
+                    search_url = f"https://search.brave.com/search?q={encoded_query}"
 
-                req = urllib.request.Request(search_url, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                })
+                    req = urllib.request.Request(search_url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    })
 
-                html = None
-                for attempt in range(3):
-                    try:
-                        resp = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
-                        html = resp.read().decode('utf-8', errors='ignore')
-                        break
-                    except urllib.error.HTTPError as e:
-                        if e.code == 429 and attempt < 2:
-                            wait = 3 + 4 * attempt + random.uniform(0, 2)  # ~3s, ~7s, ~11s
-                            self._log(f"    ⏳ Rate limited, waiting {wait:.0f}s...")
-                            await asyncio.sleep(wait)
-                            continue
-                        self._log(f"    Brave search error: {e}")
-                        break
-                    except Exception as e:
-                        self._log(f"    Brave search error: {e}")
-                        break
+                    html = None
+                    for attempt in range(3):
+                        try:
+                            resp = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
+                            html = resp.read().decode('utf-8', errors='ignore')
+                            break
+                        except urllib.error.HTTPError as e:
+                            if e.code == 429 and attempt < 2:
+                                wait = 3 + 4 * attempt + random.uniform(0, 2)  # ~3s, ~7s, ~11s
+                                self._log(f"    ⏳ Rate limited, waiting {wait:.0f}s...")
+                                await asyncio.sleep(wait)
+                                continue
+                            self._log(f"    Brave search error: {e}")
+                            break
+                        except Exception as e:
+                            self._log(f"    Brave search error: {e}")
+                            break
 
-                if not html or len(html) < 1000:
+                    if not html or len(html) < 1000:
+                        continue
+
+                    # Parse Brave results: split on snippet blocks
+                    # Each <div class="snippet ..."> contains one search result
+                    snippet_blocks = html.split('class="snippet ')
+                    result_urls = []
+                    seen_urls = set()
+
+                    for block in snippet_blocks[1:]:  # Skip first (before any snippet)
+                        # Extract the first external href from each snippet block
+                        hrefs = re.findall(
+                            r'href="(https?://(?!search\.brave|brave\.com|cdn\.search\.brave)[^"]+)"',
+                            block[:3000]
+                        )
+                        for href in hrefs:
+                            url_clean = href.split('#')[0].rstrip('/')
+                            if url_clean not in seen_urls:
+                                seen_urls.add(url_clean)
+                                result_urls.append(href)
+                                break  # Only first URL per snippet = the result link
+
+                    self._log(f"    Brave returned {len(result_urls)} results")
+
+                    for url in result_urls:
+                        if _is_useful_result(url):
+                            _add_result(url)
+                            brave_worked = True
+
+                except Exception as e:
+                    self._log(f"    Brave search error: {e}")
                     continue
 
-                # Parse Brave results: split on snippet blocks
-                # Each <div class="snippet ..."> contains one search result
-                snippet_blocks = html.split('class="snippet ')
-                result_urls = []
-                seen_urls = set()
-
-                for block in snippet_blocks[1:]:  # Skip first (before any snippet)
-                    # Extract the first external href from each snippet block
-                    hrefs = re.findall(
-                        r'href="(https?://(?!search\.brave|brave\.com|cdn\.search\.brave)[^"]+)"',
-                        block[:3000]
-                    )
-                    for href in hrefs:
-                        url_clean = href.split('#')[0].rstrip('/')
-                        if url_clean not in seen_urls:
-                            seen_urls.add(url_clean)
-                            result_urls.append(href)
-                            break  # Only first URL per snippet = the result link
-
-                self._log(f"    Brave returned {len(result_urls)} results")
-
-                for url in result_urls:
-                    if _is_useful_result(url):
-                        _add_result(url)
-                        brave_worked = True
-
-            except Exception as e:
-                self._log(f"    Brave search error: {e}")
-                continue
-
-            if qi < 2:
-                await asyncio.sleep(2.0 + random.uniform(0, 1.5))  # 2-3.5s between queries
+                if qi < 2:
+                    await asyncio.sleep(1.0 + random.uniform(0, 0.5))  # 1-1.5s between queries (no competition)
+        finally:
+            _brave_search_lock.release()
+            self._log(f"    🔓 Brave Search slot vrijgegeven")
 
         # === FALLBACK: DuckDuckGo HTML (if Brave returned nothing) ===
         if not brave_worked:
