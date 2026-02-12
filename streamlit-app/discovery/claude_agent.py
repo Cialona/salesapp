@@ -2924,8 +2924,18 @@ Reply with ONLY a JSON array of objects, one per page. Example:
             await self.browser.launch()
             self._log("Browser launched")
 
-            await self.browser.goto(start_url)
-            self._log(f"Navigated to: {start_url}")
+            try:
+                await self.browser.goto(start_url)
+                self._log(f"Navigated to: {start_url}")
+            except Exception as nav_err:
+                self._log(f"⚠️ Start URL timeout: {start_url} ({nav_err})")
+                # Try Google as fallback entry point
+                fallback_url = f"https://www.google.com/search?q={input_data.fair_name}+exhibitor+information"
+                try:
+                    await self.browser.goto(fallback_url)
+                    self._log(f"Navigated to fallback: Google search for {input_data.fair_name}")
+                except Exception:
+                    self._log(f"⚠️ Fallback also failed, browser agent will start on blank page")
 
             # Build dynamic system prompt based on what's found/missing
             use_focused_prompt = False
