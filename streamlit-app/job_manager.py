@@ -317,16 +317,20 @@ async def _find_fair_url(job: DiscoveryJob, api_key: str) -> Optional[str]:
     for attempt in range(max_attempts):
         error_ctx = ""
         if failed_url:
-            error_ctx = f'\nIMPORTANT: The previously suggested URL "{failed_url}" was INVALID. Double-check domain spelling.\n'
+            error_ctx = f'\nIMPORTANT: The previously suggested URL "{failed_url}" was INVALID (DNS lookup failed). Try a different domain.\n'
 
         prompt = f"""Find the official website URL for this trade fair:{error_ctx}
 
 Trade Fair: {job.fair_name}
 Year: {job.fair_year}
 {f'City: {job.fair_city}' if job.fair_city else ''}
+{f'Country: {job.fair_country}' if job.fair_country else ''}
+
+Common URL patterns for trade fairs: www.fairname-expo.com, www.fairname.com, www.fairname.de, www.fairname-cologne.com, etc.
+The URL should include 'https://' prefix.
 
 Return ONLY a JSON object with: url, confidence ("high"/"medium"/"low"), notes.
-If not found: {{"url": null, "confidence": "low", "notes": "..."}}
+You MUST always try to provide a URL - even with "medium" or "low" confidence.
 Return ONLY JSON, no other text."""
 
         try:
@@ -372,15 +376,16 @@ Return ONLY JSON, no other text."""
                         _add_log(job, "URL gevalideerd!")
                         return candidate
                     except (socket.gaierror, socket.herror):
-                        _add_log(job, "URL ongeldig, opnieuw zoeken...")
+                        _add_log(job, f"URL DNS-fout: {candidate}, opnieuw zoeken...")
                         failed_url = candidate
                         continue
             else:
-                _add_log(job, f"Geen URL gevonden: {result.get('notes', '')}")
-                break
+                _add_log(job, f"Geen URL gevonden (poging {attempt + 1}/{max_attempts}): {result.get('notes', '')}")
+                # Don't break - retry with a fresh attempt
+                continue
 
         except Exception as e:
             _add_log(job, f"URL lookup fout: {e}")
-            break
+            continue  # Retry instead of breaking
 
     return None

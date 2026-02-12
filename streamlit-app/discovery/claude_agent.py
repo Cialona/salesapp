@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from typing import Optional, List, Dict, Any, Callable
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, quote_plus
 
 import anthropic
 
@@ -2594,12 +2594,52 @@ Reply with ONLY a JSON array of objects, one per page. Example:
         start_time = time.time()
 
         try:
-            # Validate: known_url is required for discovery
+            # If no known_url, try to find it via Google search using a temporary browser
             if not input_data.known_url:
-                self._log("❌ Geen website URL opgegeven voor deze beurs.")
-                self._log("   Discovery kan niet worden uitgevoerd zonder een bekende website URL.")
+                self._log("⚠️ Geen website URL opgegeven - probeer via Google te vinden...")
+                search_query = f"{input_data.fair_name} {input_data.city or ''} official website exhibitor".strip()
+                search_url = f"https://www.google.com/search?q={quote_plus(search_query)}"
+                search_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
+                try:
+                    await search_browser.launch()
+                    await search_browser.goto(search_url)
+                    await asyncio.sleep(2)
+                    # Extract first relevant result from Google
+                    page_text = await search_browser.get_page_text()
+                    if page_text:
+                        import re as _re
+                        # Find URLs that look like fair websites in Google results
+                        url_pattern = _re.compile(r'https?://(?:www\.)?([a-z0-9][-a-z0-9]*\.[a-z.]{2,})')
+                        skip_domains = {'google.com', 'google.nl', 'gstatic.com', 'googleapis.com',
+                                       'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
+                                       'linkedin.com', 'instagram.com', 'wikipedia.org', 'reddit.com',
+                                       'pinterest.com', 'tiktok.com'}
+                        for match in url_pattern.finditer(page_text):
+                            domain = match.group(1).lower()
+                            if not any(skip in domain for skip in skip_domains):
+                                found_url = match.group(0)
+                                self._log(f"   Google resultaat gevonden: {found_url}")
+                                input_data = type(input_data)(
+                                    fair_name=input_data.fair_name,
+                                    known_url=found_url,
+                                    city=input_data.city,
+                                    country=input_data.country,
+                                    client_name=input_data.client_name,
+                                )
+                                output.debug.notes.append(f"URL via Google gevonden: {found_url}")
+                                break
+                except Exception as e:
+                    self._log(f"   Google search mislukt: {e}")
+                finally:
+                    try:
+                        await search_browser.close()
+                    except Exception:
+                        pass
+
+            if not input_data.known_url:
+                self._log("❌ Geen website URL gevonden voor deze beurs.")
                 self._log("   Voeg een website URL toe aan de beurs en probeer opnieuw.")
-                output.debug.notes.append("Geen known_url opgegeven - discovery afgebroken")
+                output.debug.notes.append("Geen known_url opgegeven en niet via Google gevonden")
                 output.debug.discovery_log = list(self._discovery_log)
                 return output
 
@@ -2695,6 +2735,7 @@ Reply with ONLY a JSON array of objects, one per page. Example:
                     exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
                     portal_pages=[p for p in portal_pages if p.get('text_content')],
                     fair_url=input_data.known_url or '',
+                    city=input_data.city or '',
                 )
 
                 # Log and track classification results
@@ -2727,20 +2768,32 @@ Reply with ONLY a JSON array of objects, one per page. Example:
                 # agent is often needed to find schedule pages on OEM portals (Salesforce
                 # SPAs with dynamic navigation that the prescan's link extraction can miss)
                 schedule_found = classification_result.schedule and classification_result.schedule.confidence in ['strong', 'partial']
-                if classification_result.skip_agent_safe and schedule_found:
+                floorplan_found = classification_result.floorplan and classification_result.floorplan.confidence in ['strong', 'partial']
+                all_doc_types_found = schedule_found and floorplan_found and not classification_result.missing_types
+
+                if classification_result.skip_agent_safe and all_doc_types_found:
                     self._log(f"🎉 KWALITEITSCHECK GESLAAGD: {classification_result.skip_agent_reason}")
-                    self._log("   Browser agent wordt overgeslagen - documenten zijn gevalideerd.")
+                    self._log("   Browser agent wordt overgeslagen - alle documenten zijn gevalideerd.")
                     skip_browser_agent = True
                     self._sd['quality_gate'] = f"PASSED ({classification_result.skip_agent_reason})"
                     self._sd['quality_gate_passed'] = True
                     self._sd['skip_agent'] = True
-                    self._sd['skip_agent_reason'] = 'Alle docs + schema gevonden'
-                elif classification_result.skip_agent_safe and not schedule_found:
+                    self._sd['skip_agent_reason'] = 'Alle docs gevonden'
+                elif classification_result.skip_agent_safe and not all_doc_types_found:
+                    missing_info = []
+                    if not schedule_found:
+                        missing_info.append("schema")
+                    if not floorplan_found:
+                        missing_info.append("plattegrond")
+                    for mt in classification_result.missing_types:
+                        if mt not in ('schedule', 'floorplan'):
+                            missing_info.append(mt)
+                    missing_str = ", ".join(missing_info) if missing_info else "onbekend"
                     self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
-                    self._log("   Maar schema ontbreekt — browser agent draait om schema te zoeken.")
-                    self._sd['quality_gate'] = f"PASSED maar schema mist"
+                    self._log(f"   Maar {missing_str} ontbreekt — browser agent draait voor missende docs.")
+                    self._sd['quality_gate'] = f"PASSED maar {missing_str} mist"
                     self._sd['quality_gate_passed'] = True
-                    self._sd['skip_agent_reason'] = 'Schema ontbreekt → agent draait'
+                    self._sd['skip_agent_reason'] = f'{missing_str} ontbreekt → agent draait'
                 else:
                     self._log(f"⚠️ KWALITEITSCHECK: {classification_result.skip_agent_reason}")
                     self._log("   Browser agent draait voor extra validatie.")
@@ -2769,6 +2822,7 @@ Reply with ONLY a JSON array of objects, one per page. Example:
                             exhibitor_pages=pre_scan_results.get('exhibitor_pages', []),
                             portal_pages=[p for p in portal_pages if p.get('text_content')],
                             fair_url=input_data.known_url or '',
+                            city=input_data.city or '',
                         )
                         schedule_found_2 = classification_result.schedule and classification_result.schedule.confidence in ['strong', 'partial']
                         if classification_result.skip_agent_safe and schedule_found_2:
