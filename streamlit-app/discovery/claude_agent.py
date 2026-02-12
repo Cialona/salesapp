@@ -1126,29 +1126,32 @@ class ClaudeAgent:
                     except Exception as e:
                         self._log(f"    ⚠️ LLM link classification failed: {e}")
 
-            # Second pass: scan discovered pages
+            # Second pass: scan discovered pages using BFS queue.
+            # Pages discovered during scanning are added to the queue so we can
+            # follow chains like /standhouders → /standbouwers → PDFs.
             # Priority order: (1) keyword-matched document pages and external portals,
             # (2) navigation links from homepage.
-            # Keyword matches and portals are highest priority because they represent
-            # pages we KNOW are relevant (exhibitor docs, external portals like expocad).
-            # Nav links supplement this with the site's own structure.
-            second_pass_urls = []
+            scan_queue = []  # BFS queue
             seen_second_pass = set(urls_to_scan[:20])
 
             # First add keyword-matched document pages and external portals (highest priority)
             for doc_url in found_pages_to_scan:
                 if doc_url not in seen_second_pass:
-                    second_pass_urls.append(doc_url)
+                    scan_queue.append(doc_url)
                     seen_second_pass.add(doc_url)
 
             # Then add navigation links (site structure, fills remaining slots)
             for nav_url in nav_pages_to_scan:
                 if nav_url not in seen_second_pass:
-                    second_pass_urls.append(nav_url)
+                    scan_queue.append(nav_url)
                     seen_second_pass.add(nav_url)
 
             scanned_in_second_pass = 0
-            for url in second_pass_urls[:25]:  # Increased from 15 to 25 for better coverage
+            max_second_pass = 30  # Hard cap to prevent runaway crawling
+            queue_idx = 0
+            while queue_idx < len(scan_queue) and scanned_in_second_pass < max_second_pass:
+                url = scan_queue[queue_idx]
+                queue_idx += 1
                 try:
                     # Skip listing pages, individual company profiles, fragments, and login redirects
                     lower_url = url.lower()
@@ -1165,7 +1168,7 @@ class ClaudeAgent:
                     await asyncio.sleep(0.5)
                     scanned_in_second_pass += 1
 
-                    self._log(f"  ✓ Second-pass scan: {url}")
+                    self._log(f"  ✓ Second-pass scan ({scanned_in_second_pass}): {url}")
 
                     # Extract external portal URLs from page HTML (catches hidden portal links)
                     portal_urls_from_html = await pre_scan_browser.extract_external_portal_urls()
@@ -1250,14 +1253,35 @@ class ClaudeAgent:
                                 year_info = f" [{doc_year}]" if doc_year else ""
                                 self._log(f"    ⭐ High-value{year_info} (2nd): {link.text[:40]}...")
 
-                    # Also discover internal doc-type pages in second pass
-                    # (e.g., /standhouders/standbouwers links to /toegangsbeleid-op-en-afbouw)
+                    # Discover internal doc-type pages and ADD THEM TO THE QUEUE
+                    # so they get scanned too (BFS). This allows chains like:
+                    # /standhouders → /standbouwers → toegangsbeleid PDFs
                     for link in relevant_links.get('exhibitor_links', []):
-                        if link.url not in results['exhibitor_pages'] and not link.url.lower().endswith('.pdf'):
-                            link_host = urlparse(link.url).netloc.lower()
-                            if base_netloc.lower() in link_host:
-                                results['exhibitor_pages'].append(link.url)
-                                self._log(f"    🔗 Found exhibitor page (2nd pass): {link.text[:30] if link.text else link.url[:40]}...")
+                        if link.url.lower().endswith('.pdf'):
+                            continue
+                        link_host = urlparse(link.url).netloc.lower()
+                        if base_netloc.lower() not in link_host:
+                            continue
+                        if link.url not in seen_second_pass:
+                            # Check if this looks like a doc page worth scanning
+                            link_lower = link.url.lower()
+                            link_text_lower = (link.text or '').lower()
+                            is_doc_link = (
+                                any(kw in link_lower for kw in doc_keywords) or
+                                any(kw in link_text_lower for kw in doc_keywords) or
+                                any(pattern in link_lower for pattern in [
+                                    'standbouw', 'standhouder', 'contractor', 'opbouw',
+                                    'afbouw', 'toegangsbeleid', 'exhibitor-service',
+                                    'technical-regulation', 'download', 'document',
+                                ])
+                            )
+                            if is_doc_link:
+                                scan_queue.append(link.url)
+                                seen_second_pass.add(link.url)
+                                self._log(f"    🔗 Queued doc page: {link.text[:30] if link.text else link.url[:40]}...")
+
+                        if link.url not in results['exhibitor_pages']:
+                            results['exhibitor_pages'].append(link.url)
 
                 except Exception:
                     continue
