@@ -197,8 +197,12 @@ with col_info:
 # SECTION 2: Active & Recent Discoveries
 # ══════════════════════════════════════════════════════════════════════════
 
-# Collect all jobs for this session
-my_jobs = [jm.get_job(jid) for jid in st.session_state.my_job_ids if jm.get_job(jid)]
+# Collect all jobs for this session (single lookup per job)
+my_jobs = []
+for _jid in st.session_state.my_job_ids:
+    _j = jm.get_job(_jid)
+    if _j:
+        my_jobs.append(_j)
 
 # Split into active and finished
 active = [j for j in my_jobs if j.status in ("pending", "running")]
@@ -219,10 +223,11 @@ if active:
         cur_phase = jm._get_phase(job.current_phase)
         cur_idx = jm._phase_index(job.current_phase)
 
-        with st.container():
+        # Unique key per job prevents Streamlit element identity issues during auto-refresh
+        with st.container(key=f"active_{job.job_id}"):
             # Job header
             st.markdown(f"""
-            <div style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
+            <div id="header-{job.job_id}" style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
                         border: 2px solid {CIALONA_ORANGE}; box-shadow: 0 2px 8px rgba(247,147,30,0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
                     <div>
@@ -247,7 +252,7 @@ if active:
                 st.rerun()
 
             # Progress bar
-            st.progress(progress)
+            st.progress(progress, key=f"progress_{job.job_id}")
 
             # Phase indicators
             phase_cols = st.columns(len(jm.PHASES))
@@ -264,7 +269,7 @@ if active:
                             {phase['label']}</div>""", unsafe_allow_html=True)
 
             # Logs (collapsed)
-            with st.expander("Voortgang details", expanded=False):
+            with st.expander("Voortgang details", expanded=False, key=f"logs_{job.job_id}"):
                 if job.logs:
                     st.code("\n".join(job.logs[-20:]))
                 else:
