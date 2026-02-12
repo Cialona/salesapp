@@ -22,6 +22,17 @@ from .schemas import (
     ContactEmail, ContactInfo
 )
 from .document_classifier import DocumentClassifier, ClassificationResult
+from .document_types import (
+    DOCUMENT_TYPES,
+    get_scan_frontier_paths,
+    get_doc_keywords,
+    get_page_keywords,
+    get_llm_classification_prompt,
+    get_title_keywords,
+    get_content_keywords,
+    get_pdf_keywords,
+    get_pdf_exclusions,
+)
 
 
 class _DiscoveryCancelled(Exception):
@@ -1548,28 +1559,8 @@ class ClaudeAgent:
 
         self._log(f"🔍 Portal deep scan: scanning {len(portal_urls)} portal(s)...")
 
-        # Keywords that indicate pages worth scanning inside a portal
-        page_keywords = [
-            # Rules / regulations
-            'rule', 'regulation', 'guideline', 'technical', 'construction',
-            'stand build', 'stand design', 'provision', 'requirement',
-            'richtlijn', 'richtlinien', 'vorschrift', 'regolamento',
-            # Schedule
-            'schedule', 'build-up', 'buildup', 'build up', 'tear-down', 'teardown',
-            'dismantl', 'move-in', 'move-out', 'set-up', 'setup', 'timeline',
-            'deadline', 'access policy', 'timetable',
-            'aufbau', 'abbau', 'montage', 'démontage', 'opbouw', 'afbouw',
-            # Manual / guide
-            'manual', 'handbook', 'guide', 'welcome', 'exhibitor info',
-            'service', 'documentation', 'resource',
-            # Floor plan
-            'floor plan', 'floorplan', 'hall plan', 'map', 'layout', 'venue',
-            'show layout', 'site plan', 'geländeplan',
-            # Dutch: stand builders, setup/teardown, access policy
-            'standbouw', 'standbouwer', 'standhouder', 'toegang',
-            # English: contractor pages, terms & conditions
-            'contractor', 'terms and condition', 'terms-and-condition',
-        ]
+        # Keywords from central document_types registry
+        page_keywords = get_page_keywords()
 
         scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
         try:
@@ -1852,25 +1843,10 @@ class ClaudeAgent:
             for i, l in enumerate(links[:150])
         )
 
-        prompt = f"""You are helping discover exhibitor documentation for the trade fair "{fair_name}".
+        # Generate semantic prompt from central registry
+        classification_intro = get_llm_classification_prompt(fair_name, context='links')
 
-Below is a list of internal website links (link text + URL). For each link, decide whether it
-is likely to lead to a page containing information that a stand builder (contractor) would need.
-
-Select links that lead to pages about:
-- Exhibitor manuals, handbooks, welcome packs
-- Terms and conditions, general conditions, participation rules
-- Technical regulations, rules, guidelines, stand construction regulations
-- Setup/teardown (build-up/dismantling) schedules or access policies
-- Contractor / stand builder / EAC information
-- Floor plans, hall plans, venue maps, show layout, site maps, maps pages
-- Exhibitor services, logistics, sustainability guidelines
-- Important deadlines for exhibitors
-- Document downloads, forms, or resources for exhibitors
-
-This can be in ANY language (English, Dutch, German, French, Italian, Spanish, etc.).
-Be GENEROUS — if a link MIGHT contain useful exhibitor info, include it.
-Do NOT select: news articles, blog posts, visitor info, ticket sales, exhibitor directories/lists, company profiles.
+        prompt = f"""{classification_intro}
 
 Links:
 {link_list_str}
@@ -1941,16 +1917,10 @@ If none are relevant, reply with: []"""
 
         pages_str = "\n\n".join(page_summaries)
 
-        prompt = f"""You are classifying web pages from the trade fair "{fair_name}" website.
+        # Generate semantic prompt from central registry
+        classification_intro = get_llm_classification_prompt(fair_name, context='pages')
 
-For each page below, decide which type of exhibitor document it is based on its URL, title, and content.
-
-Types:
-- "rules" = Technical regulations, stand build rules, SPECIFIC terms and conditions (fair-specific rules/voorschriften)
-- "schedule" = Setup/teardown schedule, build-up/dismantling times, access policies, move-in/move-out, opbouw/afbouw schema
-- "floorplan" = Floor plan, hall plan, venue map, show layout, site map, maps page, plattegrond, Geländeplan
-- "exhibitor_manual" = Exhibitor manual/handbook, contractor info, stand builder info, exhibitor services overview, general/standard terms and conditions (participation rules)
-- "not_relevant" = Not useful for stand builders (news, visitor info, company profiles, etc.)
+        prompt = f"""{classification_intro}
 
 Pages:
 {pages_str}
@@ -2010,129 +1980,30 @@ Reply with ONLY a JSON array of objects, one per page. Example:
     def _detect_page_type(self, url: str, link_text: str, page_text: str) -> str:
         """Detect the document type of a web page based on URL, title, and content.
 
-        Uses two-phase detection:
+        Uses two-phase detection with keywords from central document_types registry:
         1. URL/title indicators (highest priority - most reliable)
         2. Content analysis (fallback for ambiguous pages)
         """
         url_title = f"{url} {link_text or ''}".lower()
 
         # === PHASE 1: URL and title based detection (reliable, no content ambiguity) ===
+        # Check exhibitor_manual FIRST for general T&C (before rules catches it)
+        # Then rules, schedule, floorplan, exhibitor_manual (general)
+        # Order matters: exhibitor_manual general T&C → rules → schedule → floorplan → exhibitor_manual general
+        check_order = ['exhibitor_manual', 'rules', 'schedule', 'floorplan']
 
-        # General/Standard T&C → exhibitor_manual (participation conditions, general info)
-        # Must be checked BEFORE rules to prevent general T&C from being classified as rules
-        if any(kw in url_title for kw in [
-            'standard-terms', 'standard terms', 'standard_terms',
-            'general-terms', 'general terms', 'general_terms',
-            'algemene-voorwaarden', 'algemene voorwaarden',
-            'conditions-generales', 'conditions générales',
-            'allgemeine-geschaeftsbedingung', 'allgemeine geschäftsbedingung',
-            'condizioni-generali', 'condiciones-generales',
-            'teilnahmebedingung', 'participation-conditions', 'participation conditions',
-        ]):
-            return 'exhibitor_manual'
-
-        # Rules from URL/title (specific/technical rules)
-        if any(kw in url_title for kw in [
-            'design-regulation', 'design regulation', 'technical-regulation',
-            'technical regulation', 'technical-guideline', 'technical guideline',
-            'stand-build-rule', 'stand build rule', 'construction-rule',
-            'reglement-technique', 'regolamento-tecnico', 'reglamento-tecnico',
-            'technische-richtlijn', 'standbouwregels',
-            # Specific terms & conditions (fair-specific rules, not general participation)
-            'specific-terms', 'specific terms', 'specific_terms',
-            'terms-and-condition', 'terms_and_condition', 'terms and condition',
-            'voorschriften',
-        ]):
-            return 'rules'
-
-        # Schedule from URL/title
-        if any(kw in url_title for kw in [
-            'event-schedule', 'event schedule', 'build-up-schedule',
-            'dismantling-schedule', 'tear-down-schedule', 'move-in-schedule',
-            'setup-schedule', '/deadline', 'access-policy', 'timetable',
-            'important-dates', 'important dates', 'key-dates', 'key dates',
-            'move-in-move-out', 'move-in schedule',
-            'aufbau-und-abbau', 'opbouw-en-afbouw', 'op-en-afbouw',
-            'toegangsbeleid', 'opbouw', 'afbouw',
-        ]):
-            return 'schedule'
-
-        # Floorplan from URL/title
-        if any(kw in url_title for kw in [
-            'floorplan', 'floor-plan', 'floor plan', 'expo-floorplan',
-            'hall-plan', 'hall plan', 'hall & site plan', 'hall and site plan',
-            'hallenplan', 'plattegrond', 'expocad', 'expofp', 'mapyourshow',
-            'planimetria', 'geländeplan', 'gelaendeplan',
-            # Synonyms: "show layout", "venue map", "/maps"
-            'show-layout', 'show layout', 'show_layout',
-            'venue-map', 'venue map', 'site-map', 'site map', 'site-plan', 'site plan',
-            '/maps',
-        ]):
-            return 'floorplan'
-
-        # Exhibitor manual from URL/title (checked AFTER specific types)
-        if any(kw in url_title for kw in [
-            'event-information', 'event information', 'event-guideline',
-            'event guideline', 'exhibitor-manual', 'exhibitor manual',
-            'exhibitor-handbook', 'exhibitor handbook', 'exhibitor-guide',
-            'exhibitor guide', 'welcome-pack', 'event-manual',
-            'exhibitor-info', 'exhibitor info',
-            'ausstellerhandbuch', 'manuel-exposant', 'manual-del-expositor',
-        ]):
-            return 'exhibitor_manual'
+        for doc_type in check_order:
+            title_kws = get_title_keywords(doc_type)
+            if title_kws and any(kw in url_title for kw in title_kws):
+                return doc_type
 
         # === PHASE 2: Content analysis (for pages with generic URL/title) ===
         combined = f"{url_title} {page_text[:1500]}".lower()
 
-        if any(kw in combined for kw in [
-            'stand build rule', 'construction rule', 'technical guideline',
-            'technical regulation', 'stand design rule', 'design regulation',
-            'design rule', 'height limit', 'technical specification',
-            'fire safety', 'construction requirement',
-            'technische richtlinie', 'standbauvorgabe', 'bauvorschrift',
-            'reglement technique', 'règlement technique',
-            'reglamento tecnico', 'regulación técnica',
-            'regolamento tecnico',
-            'technische richtlijn', 'standbouwregels',
-        ]):
-            return 'rules'
-
-        if any(kw in combined for kw in [
-            'event schedule', 'build-up schedule', 'build up schedule',
-            'dismantling schedule', 'tear-down schedule', 'move-in schedule',
-            'set-up schedule', 'build-up & dismantl', 'installation & dismantl',
-            'setup and dismantle', 'setup & dismantle',
-            'aufbau und abbau', 'aufbauzeiten', 'abbauzeiten',
-            'calendrier de montage', 'montage et démontage',
-            'calendario de montaje', 'montaje y desmontaje',
-            'calendario allestimento', 'allestimento e smontaggio',
-            'opbouw en afbouw', 'opbouwschema',
-        ]):
-            return 'schedule'
-
-        if any(kw in combined for kw in [
-            'floor plan', 'floorplan', 'hall plan', 'site map', 'venue map',
-            'exhibition layout', 'expo floorplan', 'show layout',
-            'hall & site plan', 'hall and site plan', 'site plan',
-            'hallenplan', 'plattegrond', 'geländeplan', 'gelaendeplan',
-            'expocad', 'expofp', 'mapyourshow',
-            'plan du salon', 'plan des halls',
-            'plano de la feria', 'plano del recinto',
-            'pianta del salone', 'planimetria',
-        ]):
-            return 'floorplan'
-
-        if any(kw in combined for kw in [
-            'exhibitor manual', 'exhibitor handbook', 'exhibitor guide',
-            'welcome pack', 'event manual', 'event information',
-            'exhibitor info', 'service documentation', 'exhibitor resource',
-            'ausstellerhandbuch', 'ausstellerinformation',
-            'manuel exposant', 'guide exposant',
-            'manual del expositor', 'guía del expositor',
-            'manuale espositore', 'guida espositore',
-            'handleiding exposant', 'exposanten handleiding',
-        ]):
-            return 'exhibitor_manual'
+        for doc_type in check_order:
+            content_kws = get_content_keywords(doc_type)
+            if content_kws and any(kw in combined for kw in content_kws):
+                return doc_type
 
         return 'unknown'
 
