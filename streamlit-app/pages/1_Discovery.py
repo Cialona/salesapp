@@ -269,7 +269,7 @@ if active:
                             {phase['label']}</div>""", unsafe_allow_html=True)
 
             # Logs (collapsed)
-            with st.expander("Voortgang details", expanded=False, key=f"logs_{job.job_id}"):
+            with st.expander("Voortgang details", expanded=False):
                 if job.logs:
                     st.code("\n".join(job.logs[-20:]))
                 else:
