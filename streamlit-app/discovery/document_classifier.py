@@ -612,20 +612,25 @@ class DocumentClassifier:
                 setattr(result, mapped_type, classification)
                 self.log(f"  ~ Portal page [{mapped_type}]: partial")
 
-        # Post-process: promote PARTIAL portal pages to STRONG if they're from a
-        # year-verified portal. OEM portals are edition-specific, so if one page from
-        # the portal has year verification, sibling pages can inherit it.
-        verified_portal_bases = set()
+        # Post-process: LLM-validated promotion of weak/partial portal pages.
+        # If a page is from the same portal as a STRONG-classified document, we
+        # re-validate with extra context (the portal is confirmed for this fair).
+        verified_portal_bases: Dict[str, str] = {}  # base → verified doc_type
         for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
             cls = getattr(result, doc_type, None)
             if cls and cls.confidence == 'strong' and cls.year_verified and cls.url:
                 parsed = urlparse(cls.url)
-                # Extract portal base: host + first path segment (e.g., /mwcoem)
                 path_parts = parsed.path.strip('/').split('/')
                 base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
-                verified_portal_bases.add(base)
+                verified_portal_bases[base] = doc_type
 
         if verified_portal_bases:
+            # Build URL → full text content lookup from portal_pages
+            page_text_map: Dict[str, str] = {}
+            for page in portal_pages:
+                if page.get('text_content') and page.get('url'):
+                    page_text_map[page['url']] = page['text_content']
+
             for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
                 cls = getattr(result, doc_type, None)
                 if cls and cls.confidence in ('partial', 'weak') and cls.url:
@@ -633,13 +638,25 @@ class DocumentClassifier:
                     path_parts = parsed.path.strip('/').split('/')
                     base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
                     if base in verified_portal_bases:
-                        # Portal pages from a verified portal inherit year + fair verification
-                        # because the portal itself is fair-specific
-                        cls.year_verified = True
-                        cls.fair_verified = True
-                        cls.confidence = 'strong'
-                        cls.is_validated = True
-                        self.log(f"  ⬆ Promoted [{doc_type}] to STRONG (inherited from verified portal {base})")
+                        verified_by = verified_portal_bases[base]
+                        full_text = page_text_map.get(cls.url, cls.text_excerpt or '')
+                        if full_text:
+                            self.log(f"  🔄 Re-validating [{doc_type}] with portal context (verified via {verified_by})...")
+                            new_cls = await self._revalidate_with_portal_context(
+                                url=cls.url,
+                                text_content=full_text,
+                                expected_type=doc_type,
+                                fair_name=fair_name,
+                                target_year=target_year,
+                                verified_by_type=verified_by,
+                                portal_base=base,
+                                city=city,
+                            )
+                            if new_cls and new_cls.confidence == 'strong':
+                                setattr(result, doc_type, new_cls)
+                                self.log(f"  ⬆ Promoted [{doc_type}] to STRONG (LLM confirmed, portal: {base})")
+                            else:
+                                self.log(f"  ✗ [{doc_type}] NOT promoted (LLM rejected: {new_cls.reason if new_cls else 'error'})")
 
         # For portal home pages: if we have a portal URL but haven't assigned exhibitor_manual,
         # check if the portal home page qualifies as exhibitor manual
@@ -784,6 +801,151 @@ class DocumentClassifier:
             classification.confidence = 'none'
 
         return classification
+
+    async def _revalidate_with_portal_context(
+        self,
+        url: str,
+        text_content: str,
+        expected_type: str,
+        fair_name: str,
+        target_year: str,
+        verified_by_type: str,
+        portal_base: str,
+        city: str = "",
+    ) -> Optional[DocumentClassification]:
+        """
+        Re-validate a weak/partial portal page using LLM with extra portal context.
+
+        The key insight: if another page from the same portal has been confirmed as
+        STRONG for this fair+year, then this page is also from the same fair.
+        The LLM only needs to confirm the document TYPE is correct and content is useful.
+        """
+        type_def = DOCUMENT_TYPES.get(expected_type, {})
+        expected_desc = type_def.get('llm_description', expected_type)
+
+        city_info = f" in {city}" if city else ""
+
+        prompt = f"""Je hervalideert een portal-pagina met extra context.
+
+CONTEXT: Deze pagina komt van het exhibitor portal "{portal_base}".
+Een andere pagina van HETZELFDE portal is al bevestigd als STRONG voor {fair_name}{city_info} ({target_year}).
+Dat betekent dat dit portal specifiek is voor {fair_name} {target_year}.
+De vraag is ALLEEN: bevat deze pagina nuttige {expected_type} ({expected_desc}) informatie?
+
+DOCUMENT URL: {url}
+VERWACHT TYPE: {expected_type} - {expected_desc}
+
+PAGINA TEKST:
+---
+{text_content[:8000]}
+---
+
+Beantwoord in JSON formaat:
+{{
+  "is_correct_type": true/false,
+  "is_useful": true/false,
+  "reason": "korte uitleg waarom wel/niet",
+
+  "schedule_found": true/false,
+  "build_up": [
+    {{"date": "2026-03-01", "time": "08:00-20:00", "description": "..."}}
+  ],
+  "tear_down": [
+    {{"date": "2026-03-05", "time": "18:00-22:00", "description": "..."}}
+  ],
+
+  "emails": ["email@example.com"],
+  "phones": ["+31 123 456 789"],
+  "organization": "naam van de organisatie"
+}}
+
+BELANGRIJK:
+- "is_correct_type" = ALLEEN true als dit ECHT {expected_type} content bevat
+- "is_useful" = true als het nuttige, concrete info bevat (niet alleen een menu of linklijst)
+- Je hoeft NIET te checken of het de juiste beurs/jaar is — dat is al bevestigd via het portal
+- Extraheer WEL schedule datums, emails en telefoons als die er staan
+
+Antwoord ALLEEN met valide JSON."""
+
+        try:
+            import random as _rnd
+            response = None
+            for _api_attempt in range(4):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=2000,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    break
+                except Exception as rate_err:
+                    if 'rate_limit' in str(rate_err).lower() or '429' in str(rate_err):
+                        wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                        self.log(f"    ⏳ API rate limit (poging {_api_attempt + 1}/4), wacht {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        if _api_attempt == 3:
+                            raise
+                    else:
+                        raise
+
+            if response is None:
+                return None
+
+            response_text = response.content[0].text.strip()
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+
+            validation = json.loads(response_text)
+
+            is_correct_type = validation.get('is_correct_type', False)
+            is_useful = validation.get('is_useful', False)
+
+            if not (is_correct_type and is_useful):
+                cls = DocumentClassification(
+                    url=url,
+                    document_type=expected_type,
+                    confidence='none',
+                    reason=validation.get('reason', 'LLM rejected'),
+                )
+                return cls
+
+            # LLM confirmed: build STRONG classification
+            cls = DocumentClassification(
+                url=url,
+                document_type=expected_type,
+                confidence='strong',
+                is_validated=True,
+                year_verified=True,   # Inherited from verified portal
+                fair_verified=True,   # Inherited from verified portal
+                content_verified=True,
+                reason=validation.get('reason', 'Portal context + LLM confirmed'),
+                text_excerpt=text_content[:1000],
+            )
+
+            # Extract schedule if present
+            if validation.get('schedule_found'):
+                cls.extracted_schedule = ExtractedSchedule(
+                    build_up=validation.get('build_up', []),
+                    tear_down=validation.get('tear_down', []),
+                    source_url=url,
+                )
+
+            # Extract contacts
+            if validation.get('emails') or validation.get('phones'):
+                cls.extracted_contacts = ExtractedContact(
+                    emails=validation.get('emails', []),
+                    phones=validation.get('phones', []),
+                    organization=validation.get('organization'),
+                    source_url=url,
+                )
+
+            return cls
+
+        except Exception as e:
+            self.log(f"    ⚠️ Re-validation error: {e}")
+            return None
 
     async def _llm_batch_classify_pdfs(
         self,
