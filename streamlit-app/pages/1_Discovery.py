@@ -202,7 +202,7 @@ my_jobs = [jm.get_job(jid) for jid in st.session_state.my_job_ids if jm.get_job(
 
 # Split into active and finished
 active = [j for j in my_jobs if j.status in ("pending", "running")]
-finished = [j for j in my_jobs if j.status in ("completed", "failed")]
+finished = [j for j in my_jobs if j.status in ("completed", "failed", "cancelled")]
 
 # ── Active discoveries ───────────────────────────────────────────────────
 if active:
@@ -240,6 +240,11 @@ if active:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # Stop button for this individual job
+            if st.button("Stoppen", key=f"stop_{job.job_id}", type="secondary"):
+                jm.stop_job(job.job_id)
+                st.rerun()
 
             # Progress bar
             st.progress(progress)
@@ -320,6 +325,28 @@ if finished:
                     if st.button("Email Sturen", key=f"email_{job.job_id}", use_container_width=True):
                         st.session_state['selected_fair'] = job.fair_id
                         st.switch_page("pages/3_Email_Generator.py")
+
+        elif job.status == "cancelled":
+            # Cancelled job
+            st.markdown(f"""
+            <div style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
+                        border: 2px solid #F59E0B; box-shadow: 0 2px 8px rgba(245,158,11,0.1);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong style="font-size: 1.1rem; color: {CIALONA_NAVY};">
+                            {job.fair_name} {job.fair_year}
+                        </strong>
+                        <span style="background: #FEF3C7; color: #92400E; padding: 0.15rem 0.6rem;
+                              border-radius: 9999px; font-size: 0.75rem; margin-left: 0.5rem;">
+                            Gestopt
+                        </span>
+                    </div>
+                    <div style="color: #6B7280; font-size: 0.85rem;">
+                        {e_mins}:{e_secs:02d}
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
         else:
             # Failed job

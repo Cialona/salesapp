@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Dict, List
 
+# ── Exceptions ───────────────────────────────────────────────────────────
+
+class DiscoveryCancelled(Exception):
+    """Raised when a discovery job is cancelled by the user."""
+    pass
+
+
 # ── Job data structures ──────────────────────────────────────────────────
 
 @dataclass
@@ -23,7 +30,7 @@ class DiscoveryJob:
     fair_city: str = ""
     fair_country: str = ""
     client_name: str = ""
-    status: str = "pending"           # pending | running | completed | failed
+    status: str = "pending"           # pending | running | completed | failed | cancelled
     current_phase: str = "url_lookup"
     progress: int = 0
     logs: List[str] = field(default_factory=list)
@@ -33,6 +40,7 @@ class DiscoveryJob:
     end_time: float = 0.0
     fair_id: Optional[str] = None     # Set after import into data_manager
     phase_start_time: float = 0.0
+    cancel_event: Optional[threading.Event] = field(default=None, repr=False)
 
 
 # ── Module-level singleton store ─────────────────────────────────────────
@@ -59,7 +67,7 @@ def get_active_jobs() -> List[DiscoveryJob]:
 
 def get_completed_jobs() -> List[DiscoveryJob]:
     with _lock:
-        return [j for j in _jobs.values() if j.status in ("completed", "failed")]
+        return [j for j in _jobs.values() if j.status in ("completed", "failed", "cancelled")]
 
 
 def remove_job(job_id: str):
@@ -67,13 +75,25 @@ def remove_job(job_id: str):
         _jobs.pop(job_id, None)
 
 
+def stop_job(job_id: str) -> bool:
+    """Request cancellation of a running job. Returns True if the signal was sent."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job.status not in ("pending", "running"):
+            return False
+        if job.cancel_event:
+            job.cancel_event.set()
+        _add_log(job, "⛔ Stop aangevraagd door gebruiker")
+        return True
+
+
 def cleanup_old_jobs(max_age_secs: int = 3600):
-    """Remove completed/failed jobs older than max_age_secs."""
+    """Remove completed/failed/cancelled jobs older than max_age_secs."""
     now = time.time()
     with _lock:
         to_remove = [
             jid for jid, j in _jobs.items()
-            if j.status in ("completed", "failed")
+            if j.status in ("completed", "failed", "cancelled")
             and j.end_time > 0
             and (now - j.end_time) > max_age_secs
         ]
@@ -153,6 +173,7 @@ def start_discovery(
         client_name=client_name,
         start_time=time.time(),
         phase_start_time=time.time(),
+        cancel_event=threading.Event(),
     )
 
     with _lock:
@@ -182,24 +203,38 @@ def _run_discovery_thread(job_id: str, api_key: str):
             _run_discovery_async(job, api_key)
         )
 
-        # Import result into data_manager
-        import data_manager as dm
-        result['year'] = job.fair_year
-        fair_id = dm.import_discovery_result(result)
+        # Check if cancelled during execution
+        if job.cancel_event and job.cancel_event.is_set():
+            job.status = "cancelled"
+            _add_log(job, "⛔ Discovery gestopt door gebruiker")
+        else:
+            # Import result into data_manager
+            import data_manager as dm
+            result['year'] = job.fair_year
+            fair_id = dm.import_discovery_result(result)
 
-        job.result = result
-        job.fair_id = fair_id
-        job.status = "completed"
-        job.current_phase = "results"
-        job.progress = 100
-        _add_log(job, f"Discovery voltooid! Fair ID: {fair_id}")
+            job.result = result
+            job.fair_id = fair_id
+            job.status = "completed"
+            job.current_phase = "results"
+            job.progress = 100
+            _add_log(job, f"Discovery voltooid! Fair ID: {fair_id}")
+
+    except DiscoveryCancelled:
+        job.status = "cancelled"
+        _add_log(job, "⛔ Discovery gestopt door gebruiker")
 
     except Exception as e:
         import traceback
-        job.error = str(e)
-        job.status = "failed"
-        _add_log(job, f"FOUT: {e}")
-        _add_log(job, traceback.format_exc())
+        # Don't mark as failed if it was actually cancelled
+        if job.cancel_event and job.cancel_event.is_set():
+            job.status = "cancelled"
+            _add_log(job, "⛔ Discovery gestopt door gebruiker")
+        else:
+            job.error = str(e)
+            job.status = "failed"
+            _add_log(job, f"FOUT: {e}")
+            _add_log(job, traceback.format_exc())
 
     finally:
         job.end_time = time.time()
@@ -237,6 +272,10 @@ async def _run_discovery_async(job: DiscoveryJob, api_key: str) -> dict:
 
     fair_url = await _find_fair_url(job, api_key)
 
+    # Check for cancellation between steps
+    if job.cancel_event and job.cancel_event.is_set():
+        raise DiscoveryCancelled()
+
     # ── Step 2: Run agent ─────────────────────────────────────
     if fair_url:
         _add_log(job, f"Start URL: {fair_url}")
@@ -258,6 +297,7 @@ async def _run_discovery_async(job: DiscoveryJob, api_key: str) -> dict:
         on_status=on_status,
         on_phase=on_phase,
         download_dir_suffix=job.job_id,
+        cancel_event=job.cancel_event,
     )
 
     output = await agent.run(input_data)
