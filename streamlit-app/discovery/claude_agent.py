@@ -572,7 +572,7 @@ class ClaudeAgent:
         # Search the web to find exhibitor manuals/portals that may not be linked from main site
         if fair_name:
             self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
-            web_search_results = await self._web_search_for_portals(fair_name)
+            web_search_results = await self._web_search_for_portals(fair_name, fair_url=base_url)
             self._sd['web_search_pdfs'] = len(web_search_results.get('pdf_links', []))
             self._sd['web_search_portals'] = len(web_search_results.get('portal_urls', []))
 
@@ -726,8 +726,8 @@ class ClaudeAgent:
             'floor', 'plan', 'hall', 'gelaende', 'exhibitor', 'aussteller',
             # Dutch terms
             'standbouw', 'standhouder', 'opbouw', 'afbouw', 'toegang',
-            # English: contractor pages (stand builders, EAC info)
-            'contractor',
+            # English: contractor pages, terms & conditions
+            'contractor', 'terms-and-condition', 'terms_and_condition',
         ]
 
         found_pages_to_scan = []  # Pages found that we should also scan
@@ -1053,8 +1053,8 @@ class ClaudeAgent:
                             # Dutch: stand builder pages, setup/teardown schedules
                             'standhouder', 'standbouwer', 'opbouw', 'afbouw',
                             'op-en-afbouw', 'toegangsbeleid',
-                            # English: contractor / EAC pages
-                            'contractor',
+                            # English: contractor / EAC pages, terms & conditions
+                            'contractor', 'terms-and-condition',
                         ])
 
                         if url_has_keyword or text_has_keyword or is_document_page:
@@ -1413,6 +1413,10 @@ class ClaudeAgent:
 
             portal_urls.sort(key=_relevance_score, reverse=True)
 
+            # Remove portals with zero relevance score — these likely belong to other fairs
+            # (e.g. MWC portals appearing in Provada results due to generic web search)
+            portal_urls = [u for u in portal_urls if _relevance_score(u) > 0]
+
         return portal_urls
 
     async def _deep_scan_portals(self, portal_urls: List[str], fair_name: str) -> List[Dict]:
@@ -1450,8 +1454,8 @@ class ClaudeAgent:
             'floor plan', 'floorplan', 'hall plan', 'map', 'layout', 'venue',
             # Dutch: stand builders, setup/teardown, access policy
             'standbouw', 'standbouwer', 'standhouder', 'toegang',
-            # English: contractor pages
-            'contractor',
+            # English: contractor pages, terms & conditions
+            'contractor', 'terms and condition', 'terms-and-condition',
         ]
 
         scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
@@ -1738,13 +1742,14 @@ class ClaudeAgent:
 
 Below is a list of internal website links (link text + URL). For each link, decide whether it
 is likely to lead to a page with useful exhibitor documentation such as:
-- Exhibitor manuals, handbooks, welcome packs
+- Exhibitor manuals, handbooks, welcome packs, terms and conditions
 - Technical regulations, rules, guidelines, stand build regulations
 - Setup/teardown (build-up/dismantling) schedules or access policies
 - Contractor / stand builder information (EAC, appointed contractors)
 - Floor plans, hall plans, venue maps
 - Exhibitor services, logistics, sustainability guidelines
 - Important deadlines for exhibitors
+- General conditions, terms of participation, voorwaarden
 
 This can be in ANY language (English, Dutch, German, French, Italian, Spanish, etc.).
 
@@ -1967,7 +1972,7 @@ If none are relevant, reply with: []"""
 
         return found_pdfs
 
-    async def _web_search_for_portals(self, fair_name: str) -> dict:
+    async def _web_search_for_portals(self, fair_name: str, fair_url: str = "") -> dict:
         """
         Search the web for exhibitor portals and event manuals.
         Uses Brave Search (primary) via plain HTTP — no Playwright needed.
@@ -2039,6 +2044,23 @@ If none are relevant, reply with: []"""
             if word not in stop_words and len(word) >= 3:
                 fair_pdf_keywords.append(word)
 
+        # Fair name words for portal relevance filtering (prevent cross-fair contamination)
+        fair_name_words = set()
+        for word in name_words:
+            if word not in stop_words and len(word) >= 3:
+                fair_name_words.add(word)
+        # Also add concatenated name (e.g. "greentech", "provada")
+        concat_name = clean_name.lower().replace(' ', '').replace('-', '')
+        if len(concat_name) >= 3:
+            fair_name_words.add(concat_name)
+        # Extract base domain of the fair's website (used for portal filtering)
+        fair_base_domain = ''
+        if fair_url:
+            try:
+                fair_base_domain = urlparse(fair_url).netloc.lower().replace('www.', '')
+            except Exception:
+                pass
+
         # URL keyword matching for non-PDF results (portals, important pages)
         url_keywords = [
             'exhibitor', 'oem', 'event-manual', 'eventmanual',
@@ -2061,9 +2083,17 @@ If none are relevant, reply with: []"""
                 if any(se in host for se in ['bing.com', 'google.', 'duckduckgo', 'yahoo.', 'brave.com']):
                     return False
 
-                # Domain whitelist (portals, CDNs)
+                # Domain whitelist (portals, CDNs) — but REQUIRE fair relevance
+                # to prevent cross-fair contamination (e.g. MWC portals showing up for Provada)
                 if any(domain in host for domain in interesting_domains):
-                    return True
+                    # Check if the URL contains any word from the fair name
+                    if any(fw in url_lower for fw in fair_name_words if len(fw) >= 3):
+                        return True
+                    # Also accept if the fair's website domain appears in the URL
+                    if fair_base_domain and fair_base_domain in host:
+                        return True
+                    # Generic portal homepages without fair name — skip
+                    return False
 
                 # URL contains exhibitor/document keywords
                 if any(kw in url_lower for kw in url_keywords):
