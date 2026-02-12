@@ -213,7 +213,7 @@ with tab_docs:
     schedule = fair.get('schedule', {})
     build_up = schedule.get('build_up', [])
     tear_down = schedule.get('tear_down', [])
-    has_schedule = len(build_up) > 0 or len(tear_down) > 0
+    has_schedule = len(build_up) > 0 or len(tear_down) > 0 or bool(fair.get('documents', {}).get('schedule_page_url'))
 
     st.markdown(f"""
     <div style="background: white; border-radius: 12px; padding: 1rem;
@@ -229,12 +229,19 @@ with tab_docs:
 with tab_schedule:
     st.markdown("### Opbouw & Afbouw Schema")
 
+    schedule_page_url = fair.get('documents', {}).get('schedule_page_url', '')
     schedule = fair.get('schedule', {})
     build_up = schedule.get('build_up', [])
     tear_down = schedule.get('tear_down', [])
 
+    if schedule_page_url:
+        st.markdown(f"[🔗 Schema pagina openen]({schedule_page_url})")
+
     if not build_up and not tear_down:
-        st.info("Geen schema informatie beschikbaar.")
+        if schedule_page_url:
+            st.warning("Schema pagina gevonden maar geen datums geëxtraheerd. Bekijk de pagina hierboven.")
+        else:
+            st.info("Geen schema informatie beschikbaar.")
     else:
         col_build, col_tear = st.columns(2)
 
