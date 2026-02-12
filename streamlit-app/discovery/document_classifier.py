@@ -554,12 +554,27 @@ class DocumentClassifier:
             # Auto-accept docs confirmed by site navigation (fair's own menu labelled it)
             # e.g., Greentech "Floor plan" → rai-productie.rai.nl
             is_nav_confirmed = page.get('nav_confirmed', False)
+            # Auto-accept fair-domain floorplans whose URL matches a known floorplan
+            # URL pattern (e.g., /show-layout, /floorplan, /maps, /hall-plan).
+            # Interactive maps / image-based floorplans have minimal extractable text,
+            # so LLM validation often fails. The URL pattern is a strong enough signal.
+            floorplan_url_patterns = DOCUMENT_TYPES['floorplan'].get('url_patterns', [])
+            is_url_pattern_floorplan = (
+                mapped_type == 'floorplan'
+                and any(pat in page_url.lower() for pat in floorplan_url_patterns)
+            )
             if mapped_type == 'floorplan' and (
                 any(fp in page_url.lower() for fp in known_floorplan_providers)
                 or is_portal_floorplan
                 or is_nav_confirmed
+                or is_url_pattern_floorplan
             ):
-                reason = 'Navigation-confirmed floorplan' if is_nav_confirmed else 'Known floorplan provider (interactive)'
+                if is_nav_confirmed:
+                    reason = 'Navigation-confirmed floorplan'
+                elif is_url_pattern_floorplan:
+                    reason = 'URL-pattern floorplan (e.g., /show-layout, /floorplan)'
+                else:
+                    reason = 'Known floorplan provider (interactive)'
                 classification = DocumentClassification(
                     url=page_url,
                     document_type='floorplan',
