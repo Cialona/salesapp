@@ -2948,8 +2948,10 @@ Vind informatie voor de beurs: {input_data.fair_name}
                 self._log(f"Iteration {iteration}/{effective_max_iterations}")
 
                 # Dynamic mid-point check - at ~60% of iterations
+                # Inject text into the LAST user message to avoid consecutive user messages
                 midpoint = max(5, effective_max_iterations * 3 // 5)
                 remaining_at_mid = effective_max_iterations - midpoint
+                inject_text = None
                 if iteration == midpoint:
                     mid_msg = f"📊 TUSSENTIJDSE CHECK (iteratie {midpoint}/{effective_max_iterations}):\n\n"
                     if use_focused_prompt and classification_result:
@@ -2967,21 +2969,28 @@ Vind informatie voor de beurs: {input_data.fair_name}
                         mid_msg += "3. Participate / How to exhibit sectie\n"
                         mid_msg += "4. Subdomeinen (exhibitors.xxx.com)\n"
                     mid_msg += f"\nJe hebt nog {remaining_at_mid} acties - gebruik ze gericht!"
-                    messages.append({
-                        "role": "user",
-                        "content": [{"type": "text", "text": mid_msg}],
-                    })
+                    inject_text = mid_msg
 
                 # Warn agent to wrap up when approaching limit
                 if iteration == effective_max_iterations - 3:
-                    messages.append({
-                        "role": "user",
-                        "content": [{"type": "text", "text": """⚠️ Je hebt nog 3 acties over. Begin nu met je JSON samenvatting.
+                    inject_text = """⚠️ Je hebt nog 3 acties over. Begin nu met je JSON samenvatting.
 
 BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan de criteria voldoet!
 - Als een document NIET aan de criteria voldeed, zet url op null en leg uit waarom in validation
 - Wees EERLIJK: alleen "VOLDOET" als het echt aan alle criteria voldoet
-- Bij twijfel: "NIET GEVONDEN" is beter dan een verkeerd document accepteren"""}],
+- Bij twijfel: "NIET GEVONDEN" is beter dan een verkeerd document accepteren"""
+
+                # Merge injected text into last user message to prevent consecutive user messages
+                if inject_text and messages and messages[-1]["role"] == "user":
+                    last_content = messages[-1]["content"]
+                    if isinstance(last_content, list):
+                        last_content.append({"type": "text", "text": inject_text})
+                    else:
+                        messages[-1]["content"] = [{"type": "text", "text": inject_text}]
+                elif inject_text:
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": inject_text}],
                     })
 
                 # Call Claude with computer use (with retry on rate limit)
@@ -3096,8 +3105,22 @@ BELANGRIJK: Voeg voor elk document validation_notes toe die bewijzen dat het aan
                             "content": result,
                         })
 
-                # Add tool results to messages
-                messages.append({"role": "user", "content": tool_results})
+                    else:
+                        # Unknown tool (e.g. bash, text_editor from computer-use beta)
+                        self._log(f"Unknown tool called: {tool_use.name}")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": [{"type": "text", "text": f"Tool '{tool_use.name}' is not available. Use computer, goto_url, or deep_scan instead."}],
+                            "is_error": True,
+                        })
+
+                # Add tool results to messages (guard against empty content)
+                if tool_results:
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    # Fallback: should not happen, but prevent empty user message
+                    messages.append({"role": "user", "content": [{"type": "text", "text": "Ga verder met je zoektocht."}]})
 
                 # Log action
                 elapsed_ms = int((time.time() - start_time) * 1000)
