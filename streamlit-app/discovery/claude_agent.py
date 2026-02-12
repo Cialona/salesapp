@@ -1146,6 +1146,7 @@ class ClaudeAgent:
 
             scanned_in_second_pass = 0
             max_second_pass = 30  # Hard cap to prevent runaway crawling
+            _pending_llm_pages = []  # Fair-domain pages with 'unknown' type → batch LLM classify
             queue_idx = 0
             while queue_idx < len(scan_queue) and scanned_in_second_pass < max_second_pass:
                 url = scan_queue[queue_idx]
@@ -1189,6 +1190,38 @@ class ClaudeAgent:
                             self._log(f"    🔗 Portal URL in HTML source (2nd pass): {portal_url[:70]}")
 
                     relevant_links = await pre_scan_browser.get_relevant_links()
+
+                    # === EXTRACT PAGE CONTENT for fair-domain pages ===
+                    # External portals get deep-scanned later; fair-domain HTML
+                    # pages were never content-analysed (only their links were
+                    # extracted). Fix: extract text + classify RIGHT HERE so the
+                    # classifier can treat them identically to portal pages.
+                    page_host = urlparse(url).netloc.lower()
+                    is_fair_domain = (base_netloc.lower() in page_host)
+                    if is_fair_domain:
+                        try:
+                            page_state = await pre_scan_browser.get_state()
+                            page_title = page_state.title if hasattr(page_state, 'title') else ''
+                            page_text = await pre_scan_browser.extract_page_text(max_chars=10000)
+                            if page_text and len(page_text.strip()) > 50:
+                                detected_type = self._detect_page_type(url, page_title, page_text)
+                                if detected_type != 'unknown':
+                                    results['document_pages'].append({
+                                        'url': url,
+                                        'text_content': page_text,
+                                        'page_title': page_title,
+                                        'detected_type': detected_type,
+                                    })
+                                    self._log(f"    📝 Page [{detected_type}]: {page_title[:40] or url.split('/')[-1][:40]}")
+                                else:
+                                    # Store for LLM batch classification later
+                                    _pending_llm_pages.append({
+                                        'url': url,
+                                        'text_content': page_text,
+                                        'page_title': page_title,
+                                    })
+                        except Exception:
+                            pass
 
                     for link in relevant_links.get('pdf_links', []):
                         if link.url not in [p['url'] for p in results['pdf_links']]:
@@ -1272,13 +1305,31 @@ class ClaudeAgent:
                 except Exception:
                     continue
 
+            # === LLM batch classification for fair-domain pages ===
+            # Pages where _detect_page_type() returned 'unknown' are sent to
+            # Haiku in ONE batch call. The LLM reads actual page content and
+            # classifies in any language — no keywords needed.
+            if _pending_llm_pages:
+                try:
+                    llm_classified = await self._llm_classify_page_content(
+                        _pending_llm_pages, fair_name=fair_name
+                    )
+                    for page_entry in llm_classified:
+                        results['document_pages'].append(page_entry)
+                        self._log(f"    🤖 LLM page classification [{page_entry['detected_type']}]: "
+                                  f"{page_entry['page_title'][:40] or page_entry['url'].split('/')[-1][:40]}")
+                    if llm_classified:
+                        self._log(f"    🤖 LLM classified {len(llm_classified)} fair-domain page(s) from {len(_pending_llm_pages)} candidates")
+                except Exception as e:
+                    self._log(f"    ⚠️ LLM page content classification failed: {e}")
+
         except Exception as e:
             self._log(f"Pre-scan error: {e}")
         finally:
             await pre_scan_browser.close()
             self._log("Pre-scan browser closed")
 
-        self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages")
+        self._log(f"🎯 Pre-scan complete: {len(results['pdf_links'])} PDFs, {len(results['exhibitor_pages'])} exhibitor pages, {len(results['document_pages'])} document pages")
         return results
 
     def _find_portal_urls(self, pre_scan_results: Dict, fair_name: str = "") -> List[str]:
@@ -1787,6 +1838,97 @@ If none are relevant, reply with: []"""
 
         except Exception as e:
             self._log(f"    ⚠️ LLM link classification error: {e}")
+            return []
+
+    async def _llm_classify_page_content(
+        self,
+        pages: list,
+        fair_name: str = '',
+    ) -> list:
+        """Use Haiku to classify fair-domain pages by their actual CONTENT.
+
+        For pages where _detect_page_type() returned 'unknown', we send the
+        page title + content snippet to Haiku in ONE batch call. The LLM can
+        identify document types in any language without keyword lists.
+
+        Returns list of page entries with detected_type set.
+        """
+        if not pages:
+            return []
+
+        # Build compact page summaries for the prompt
+        page_summaries = []
+        for i, p in enumerate(pages[:30]):
+            title = p.get('page_title', '')
+            text = (p.get('text_content', '') or '')[:500]  # First 500 chars
+            page_summaries.append(f"{i+1}. URL: {p['url']}\n   Title: {title}\n   Content: {text}")
+
+        pages_str = "\n\n".join(page_summaries)
+
+        prompt = f"""You are classifying web pages from the trade fair "{fair_name}" website.
+
+For each page below, decide which type of exhibitor document it is based on its URL, title, and content.
+
+Types:
+- "rules" = Technical regulations, stand build rules, terms and conditions, general conditions, participation conditions, voorwaarden
+- "schedule" = Setup/teardown schedule, build-up/dismantling times, access policies, move-in/move-out, opbouw/afbouw schema
+- "floorplan" = Floor plan, hall plan, venue map, plattegrond
+- "exhibitor_manual" = Exhibitor manual/handbook, contractor info, stand builder info, exhibitor services overview
+- "not_relevant" = Not useful for stand builders (news, visitor info, company profiles, etc.)
+
+Pages:
+{pages_str}
+
+Reply with ONLY a JSON array of objects, one per page. Example:
+[{{"page": 1, "type": "rules"}}, {{"page": 2, "type": "not_relevant"}}]"""
+
+        try:
+            import random as _rnd
+            response = None
+            for _api_attempt in range(3):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=1024,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    break
+                except anthropic.RateLimitError:
+                    wait = (2 ** _api_attempt) * 3 + _rnd.uniform(0, 2)
+                    await asyncio.sleep(wait)
+                    if _api_attempt == 2:
+                        raise
+
+            if not response:
+                return []
+
+            result_text = response.content[0].text.strip()
+            # Extract JSON array
+            json_match = re.search(r'\[.*\]', result_text, re.DOTALL)
+            if not json_match:
+                return []
+
+            classifications = json.loads(json_match.group(0))
+            classified_pages = []
+            for item in classifications:
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get('page', 0)
+                doc_type = item.get('type', 'not_relevant')
+                if not isinstance(idx, int) or idx < 1 or idx > len(pages):
+                    continue
+                if doc_type in ('rules', 'schedule', 'floorplan', 'exhibitor_manual'):
+                    page = pages[idx - 1]
+                    classified_pages.append({
+                        'url': page['url'],
+                        'text_content': page['text_content'],
+                        'page_title': page['page_title'],
+                        'detected_type': doc_type,
+                    })
+            return classified_pages
+
+        except Exception as e:
+            self._log(f"    ⚠️ LLM page content classification error: {e}")
             return []
 
     def _detect_page_type(self, url: str, link_text: str, page_text: str) -> str:
@@ -2551,6 +2693,17 @@ If none are relevant, reply with: []"""
                         })
             else:
                 self._log("⚠️ Geen portal URLs gevonden in pre-scan resultaten")
+
+            # Merge fair-domain document pages into portal_pages so the
+            # classifier treats them identically to external portal content.
+            # These are HTML pages on the fair's own website whose text content
+            # was extracted and classified during the prescan second pass.
+            fair_domain_pages = pre_scan_results.get('document_pages', [])
+            if fair_domain_pages:
+                self._log(f"📄 {len(fair_domain_pages)} fair-domain page(s) met content geëxtraheerd:")
+                for fdp in fair_domain_pages:
+                    self._log(f"  [{fdp.get('detected_type', '?')}] {fdp.get('url', '?')[:70]}")
+                portal_pages.extend(fair_domain_pages)
 
             # PHASE 1.5: Classify found documents with LLM (STRICT validation)
             self._check_cancelled()
