@@ -1317,6 +1317,15 @@ class ClaudeAgent:
                                     }
                                     if is_ext_doc_nav:
                                         page_entry['nav_confirmed'] = True
+                                    # Floorplans are often visual (interactive maps, images).
+                                    # Take a screenshot so the LLM can visually verify.
+                                    if detected_type == 'floorplan':
+                                        try:
+                                            fp_screenshot = await pre_scan_browser.screenshot()
+                                            page_entry['screenshot_base64'] = fp_screenshot.base64
+                                            self._log(f"    📸 Screenshot captured for visual floorplan validation")
+                                        except Exception:
+                                            pass  # Screenshot failure is non-fatal
                                     results['document_pages'].append(page_entry)
                                     self._log(f"    📝 Page [{detected_type}]: {page_title[:40] or url.split('/')[-1][:40]}")
                                 elif is_fair_domain:
@@ -1331,13 +1340,20 @@ class ClaudeAgent:
                                 nav_text = external_doc_nav[url]
                                 detected_type = self._detect_page_type(url, nav_text, nav_text)
                                 if detected_type != 'unknown':
-                                    results['document_pages'].append({
+                                    ext_entry = {
                                         'url': url,
                                         'text_content': f'Navigation: {nav_text}',
                                         'page_title': nav_text,
                                         'detected_type': detected_type,
                                         'nav_confirmed': True,
-                                    })
+                                    }
+                                    if detected_type == 'floorplan':
+                                        try:
+                                            fp_screenshot = await pre_scan_browser.screenshot()
+                                            ext_entry['screenshot_base64'] = fp_screenshot.base64
+                                        except Exception:
+                                            pass
+                                    results['document_pages'].append(ext_entry)
                                     self._log(f"    📝 External nav [{detected_type}]: '{nav_text}' → {url[:60]}")
                         except Exception:
                             pass
