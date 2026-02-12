@@ -189,6 +189,7 @@ class DocumentClassifier:
         exhibitor_pages: List[str] = None,
         portal_pages: List[Dict] = None,
         fair_url: str = "",
+        city: str = "",
     ) -> ClassificationResult:
         """
         Classify all found PDFs and portal pages, determine what's found vs missing.
@@ -209,6 +210,12 @@ class DocumentClassifier:
         fair_name_lower = fair_name.lower()
         fair_keywords = self._extract_fair_keywords(fair_name)
         self.log(f"  Fair keywords for matching: {fair_keywords}")
+
+        # Build edition exclusion keywords to filter wrong editions of same fair
+        # E.g., Greentech Amsterdam should not match "greentech-americas" or "greentech-asia"
+        edition_exclusions = self._build_edition_exclusions(fair_name, city)
+        if edition_exclusions:
+            self.log(f"  Edition exclusions: {edition_exclusions}")
 
         # First pass: LLM-based batch classification
         # Instead of brittle keyword matching, send all PDF URLs to Haiku in one call.
@@ -238,7 +245,8 @@ class DocumentClassifier:
             for pdf in sorted_pdfs[:3]:  # Check top 3 candidates
                 url = pdf.get('url', '') if isinstance(pdf, dict) else pdf
                 classification = await self._validate_pdf_strict(
-                    url, doc_type, fair_name, fair_keywords, target_year
+                    url, doc_type, fair_name, fair_keywords, target_year,
+                    city=city, edition_exclusions=edition_exclusions,
                 )
 
                 if classification.confidence == 'strong':
@@ -259,7 +267,8 @@ class DocumentClassifier:
         if portal_pages:
             self.log(f"🌐 Classifying {len(portal_pages)} portal pages...")
             await self._classify_portal_pages(
-                portal_pages, result, fair_name, fair_keywords, target_year
+                portal_pages, result, fair_name, fair_keywords, target_year,
+                city=city, edition_exclusions=edition_exclusions,
             )
 
         # CROSS-REFERENCE PHASE: Use already-validated docs to fill gaps
@@ -358,6 +367,14 @@ class DocumentClassifier:
                         # Different domain without fair name → likely cross-fair contamination
                         score -= 6
 
+                # EDITION MATCHING: penalise wrong-edition paths
+                # E.g., /americas/exhibitors when looking for Amsterdam edition
+                if edition_exclusions:
+                    for excl in edition_exclusions:
+                        if excl in page_path:
+                            score -= 15  # Heavy penalty for wrong edition
+                            break
+
                 if score > best_score:
                     best_score = score
                     best_directory = page
@@ -433,6 +450,46 @@ class DocumentClassifier:
 
         return list(set(keywords))
 
+    def _build_edition_exclusions(self, fair_name: str, city: str) -> List[str]:
+        """Build list of URL path/filename fragments that indicate a wrong edition.
+
+        Multi-edition fairs (Greentech, Seafood Expo, etc.) share one domain but
+        have separate paths for each geographic edition.  When we know the target
+        city we can exclude the other editions so documents from e.g. the Americas
+        edition are not matched when looking for the Amsterdam edition.
+        """
+        # Map of known multi-edition fairs → {city_lower: [other_edition_slugs]}
+        # Only needed for fairs whose website mixes editions under one domain.
+        _EDITION_MAP = {
+            'greentech': {
+                'amsterdam': ['americas', 'asia'],
+                'americas': ['amsterdam', 'asia'],
+                'asia': ['amsterdam', 'americas'],
+            },
+            'seafood': {
+                'barcelona': ['asia', 'north-america', 'northamerica'],
+                'boston': ['asia', 'global'],
+                'asia': ['global', 'north-america', 'northamerica'],
+            },
+            'ism': {
+                'cologne': ['japan', 'india'],
+                'köln': ['japan', 'india'],
+                'keulen': ['japan', 'india'],
+            },
+        }
+
+        fair_lower = fair_name.lower()
+        city_lower = (city or '').lower().strip()
+        if not city_lower:
+            return []
+
+        for fair_key, editions in _EDITION_MAP.items():
+            if fair_key in fair_lower:
+                exclusions = editions.get(city_lower, [])
+                if exclusions:
+                    return [f'/{e}' for e in exclusions] + [f'-{e}' for e in exclusions]
+        return []
+
     async def _classify_portal_pages(
         self,
         portal_pages: List[Dict],
@@ -440,6 +497,8 @@ class DocumentClassifier:
         fair_name: str,
         fair_keywords: List[str],
         target_year: str,
+        city: str = "",
+        edition_exclusions: List[str] = None,
     ) -> None:
         """
         Classify web page content from external portals.
@@ -521,7 +580,8 @@ class DocumentClassifier:
             classification = await self._validate_page_content(
                 page_url, text_content, mapped_type,
                 fair_name, fair_keywords, target_year,
-                page_title=page.get('page_title', '')
+                page_title=page.get('page_title', ''),
+                city=city,
             )
 
             existing = getattr(result, mapped_type, None)
@@ -568,15 +628,18 @@ class DocumentClassifier:
         if verified_portal_bases:
             for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
                 cls = getattr(result, doc_type, None)
-                if cls and cls.confidence == 'partial' and not cls.year_verified and cls.fair_verified:
+                if cls and cls.confidence in ('partial', 'weak') and cls.url:
                     parsed = urlparse(cls.url)
                     path_parts = parsed.path.strip('/').split('/')
                     base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
                     if base in verified_portal_bases:
+                        # Portal pages from a verified portal inherit year + fair verification
+                        # because the portal itself is fair-specific
                         cls.year_verified = True
+                        cls.fair_verified = True
                         cls.confidence = 'strong'
                         cls.is_validated = True
-                        self.log(f"  ⬆ Promoted [{doc_type}] to STRONG (year inherited from same portal)")
+                        self.log(f"  ⬆ Promoted [{doc_type}] to STRONG (inherited from verified portal {base})")
 
         # For portal home pages: if we have a portal URL but haven't assigned exhibitor_manual,
         # check if the portal home page qualifies as exhibitor manual
@@ -633,6 +696,7 @@ class DocumentClassifier:
         fair_keywords: List[str],
         target_year: str,
         page_title: str = "",
+        city: str = "",
     ) -> DocumentClassification:
         """
         Validate a web page's content (same logic as _validate_pdf_strict but no PDF download).
@@ -666,7 +730,8 @@ class DocumentClassifier:
                 expected_type,
                 fair_name,
                 target_year,
-                url
+                url,
+                city=city,
             )
 
             classification.title = validation_result.get('title') or page_title
@@ -863,7 +928,9 @@ Regels:
         expected_type: str,
         fair_name: str,
         fair_keywords: List[str],
-        target_year: str
+        target_year: str,
+        city: str = "",
+        edition_exclusions: List[str] = None,
     ) -> DocumentClassification:
         """
         STRICT validation of a PDF document.
@@ -892,6 +959,16 @@ Regels:
             classification.content_verified = True
             classification.text_excerpt = text_content[:1000]
 
+            # Early reject: wrong edition based on URL or content
+            if edition_exclusions:
+                url_lower = url.lower()
+                for excl in edition_exclusions:
+                    if excl in url_lower:
+                        classification.reason = f"Wrong edition: URL contains '{excl}'"
+                        classification.confidence = 'none'
+                        self.log(f"    ✗ Skipping wrong-edition PDF: {url[:60]}... (contains '{excl}')")
+                        return classification
+
             # Check for year in content
             text_lower = text_content.lower()
             year_patterns = [target_year, target_year[2:]]  # 2026 or 26
@@ -906,7 +983,8 @@ Regels:
                 expected_type,
                 fair_name,
                 target_year,
-                url
+                url,
+                city=city,
             )
 
             # Update classification with LLM results
@@ -1016,7 +1094,8 @@ Regels:
         expected_type: str,
         fair_name: str,
         target_year: str,
-        url: str
+        url: str,
+        city: str = "",
     ) -> Dict:
         """
         Use Haiku to validate document AND extract additional info.
@@ -1030,12 +1109,20 @@ Regels:
         type_def = DOCUMENT_TYPES.get(expected_type, {})
         expected_desc = type_def.get('llm_description', expected_type)
 
+        city_warning = ""
+        if city:
+            city_warning = f"""
+GEZOCHTE STAD/EDITIE: {city}
+⚠️ LET OP EDITIE: Sommige beurzen hebben meerdere edities (bijv. Americas, Asia, Europe).
+   Dit document moet specifiek voor de {city}-editie zijn. Als het document voor een ANDERE
+   editie is (bijv. Americas ipv Amsterdam, Asia ipv Barcelona), dan is "is_correct_fair" = false!"""
+
         prompt = f"""Analyseer dit document GRONDIG en extraheer ALLE informatie.
 
 DOCUMENT URL: {url}
 GEZOCHTE BEURS: {fair_name}
 GEZOCHT JAAR: {target_year}
-VERWACHT TYPE: {expected_type} - {expected_desc}
+VERWACHT TYPE: {expected_type} - {expected_desc}{city_warning}
 
 DOCUMENT TEKST:
 ---
@@ -1070,7 +1157,7 @@ Beantwoord in JSON formaat:
 
 KWALITEITSEISEN:
 - "is_correct_type" = ALLEEN true als dit ECHT een {expected_type} is
-- "is_correct_fair" = true als document {fair_name} of de beurs-organisator noemt
+- "is_correct_fair" = true als document {fair_name} of de beurs-organisator noemt EN het de juiste editie/locatie is{f' (moet voor {city} zijn, NIET voor een andere editie zoals Americas/Asia/etc.)' if city else ''}
 - "is_correct_year" = true als document {target_year} bevat
 - "is_useful" = true als document nuttige info bevat voor standbouwers
 
