@@ -551,16 +551,21 @@ class DocumentClassifier:
                 and len(text_content or '') < 200
                 and any(pd in page_url.lower() for pd in portal_domains)
             )
+            # Auto-accept docs confirmed by site navigation (fair's own menu labelled it)
+            # e.g., Greentech "Floor plan" → rai-productie.rai.nl
+            is_nav_confirmed = page.get('nav_confirmed', False)
             if mapped_type == 'floorplan' and (
                 any(fp in page_url.lower() for fp in known_floorplan_providers)
                 or is_portal_floorplan
+                or is_nav_confirmed
             ):
+                reason = 'Navigation-confirmed floorplan' if is_nav_confirmed else 'Known floorplan provider (interactive)'
                 classification = DocumentClassification(
                     url=page_url,
                     document_type='floorplan',
                     confidence='strong',
                     title=page.get('page_title', 'Interactive Floorplan'),
-                    reason='Known floorplan provider (interactive)',
+                    reason=reason,
                     is_validated=True,
                     year_verified=True,
                     fair_verified=True,
@@ -570,7 +575,28 @@ class DocumentClassifier:
                 existing = getattr(result, 'floorplan', None)
                 if not existing or existing.confidence != 'strong':
                     setattr(result, 'floorplan', classification)
-                    self.log(f"  ✓ Known floorplan provider: {page_url[:70]}...")
+                    self.log(f"  ✓ {reason}: {page_url[:70]}...")
+                continue
+
+            # Nav-confirmed non-floorplan: auto-classify as STRONG
+            # Fair's own navigation labelled this link (e.g., "Schedule", "Rules")
+            if is_nav_confirmed and mapped_type in ('schedule', 'rules', 'exhibitor_manual', 'exhibitor_directory'):
+                classification = DocumentClassification(
+                    url=page_url,
+                    document_type=mapped_type,
+                    confidence='strong',
+                    title=page.get('page_title', mapped_type),
+                    reason=f'Navigation-confirmed {mapped_type}',
+                    is_validated=True,
+                    year_verified=True,
+                    fair_verified=True,
+                    content_verified=True,
+                    text_excerpt=text_content[:1000],
+                )
+                existing = getattr(result, mapped_type, None)
+                if not existing or existing.confidence != 'strong':
+                    setattr(result, mapped_type, classification)
+                    self.log(f"  ✓ Navigation-confirmed {mapped_type}: {page_url[:70]}...")
                 continue
 
             # Validate the page content with LLM (same as PDF but no download needed)
