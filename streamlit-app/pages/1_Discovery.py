@@ -251,8 +251,8 @@ if active:
                 jm.stop_job(job.job_id)
                 st.rerun()
 
-            # Progress bar
-            st.progress(progress, key=f"progress_{job.job_id}")
+            # Progress bar (value must be 0-100 int or 0.0-1.0 float)
+            st.progress(min(max(progress, 0), 100))
 
             # Phase indicators
             phase_cols = st.columns(len(jm.PHASES))
