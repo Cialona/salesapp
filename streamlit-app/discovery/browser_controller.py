@@ -749,6 +749,31 @@ class BrowserController:
             }''')
             await asyncio.sleep(0.3)  # Let dropdowns render
 
+            # CSS :hover is NOT triggered by JavaScript event dispatching.
+            # Force-reveal all hidden dropdown/submenu content via CSS override
+            # so we can extract links from dropdown menus.
+            await self._page.evaluate('''() => {
+                const style = document.createElement("style");
+                style.id = "__nav_reveal__";
+                style.textContent = `
+                    nav ul ul, nav li > ul, nav li > div,
+                    header ul ul, header li > ul, header li > div,
+                    .dropdown-menu, .sub-menu, .submenu, .mega-menu,
+                    [class*="dropdown"] > ul, [class*="dropdown"] > div,
+                    [class*="submenu"], [class*="sub-menu"],
+                    li.has-children > ul, li.menu-item-has-children > ul,
+                    nav li ul, header nav li ul, .navbar ul ul {
+                        display: block !important;
+                        visibility: visible !important;
+                        opacity: 1 !important;
+                        max-height: none !important;
+                        pointer-events: auto !important;
+                    }
+                `;
+                document.head.appendChild(style);
+            }''')
+            await asyncio.sleep(0.2)  # Let CSS apply
+
             nav_links = await self._page.evaluate('''() => {
                 const results = [];
                 const seen = new Set();
@@ -806,6 +831,12 @@ class BrowserController:
                     text=text[:80],
                     is_pdf=full_url.lower().endswith('.pdf')
                 ))
+
+            # Clean up injected CSS to avoid side effects on subsequent page operations
+            await self._page.evaluate('''() => {
+                const el = document.getElementById("__nav_reveal__");
+                if (el) el.remove();
+            }''')
 
             return result
 
