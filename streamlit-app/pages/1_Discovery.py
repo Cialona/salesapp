@@ -224,34 +224,20 @@ if active:
         cur_idx = jm._phase_index(job.current_phase)
 
         # Unique key per job prevents Streamlit element identity issues during auto-refresh
-        with st.container(key=f"active_{job.job_id}"):
-            # Job header
-            st.markdown(f"""
-            <div id="header-{job.job_id}" style="background: white; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;
-                        border: 2px solid {CIALONA_ORANGE}; box-shadow: 0 2px 8px rgba(247,147,30,0.15);">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
-                    <div>
-                        <strong style="font-size: 1.1rem; color: {CIALONA_NAVY};">
-                            {job.fair_name} {job.fair_year}
-                        </strong>
-                        <span style="background: {CIALONA_ORANGE}; color: white; padding: 0.15rem 0.6rem;
-                              border-radius: 9999px; font-size: 0.75rem; margin-left: 0.5rem;">
-                            {cur_phase['label']}
-                        </span>
-                    </div>
-                    <div style="color: #6B7280; font-size: 0.85rem;">
-                        ~{r_mins}:{r_secs:02d} resterend &middot; {e_mins}:{e_secs:02d} verstreken
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        with st.container(key=f"active_{job.job_id}", border=True):
+            # Job header — use native Streamlit components to avoid unsafe_allow_html delta issues
+            header_col, time_col = st.columns([3, 2])
+            with header_col:
+                st.markdown(f"**{job.fair_name} {job.fair_year}** · :orange[{cur_phase['label']}]")
+            with time_col:
+                st.caption(f"~{r_mins}:{r_secs:02d} resterend · {e_mins}:{e_secs:02d} verstreken")
 
             # Stop button for this individual job
             if st.button("Stoppen", key=f"stop_{job.job_id}", type="secondary"):
                 jm.stop_job(job.job_id)
                 st.rerun()
 
-            # Progress bar (value must be 0-100 int or 0.0-1.0 float)
+            # Progress bar
             st.progress(min(max(progress, 0), 100))
 
             # Phase indicators
@@ -259,14 +245,11 @@ if active:
             for i, (col, phase) in enumerate(zip(phase_cols, jm.PHASES)):
                 with col:
                     if i < cur_idx:
-                        col.markdown(f"""<div style="text-align:center;font-size:0.7rem;color:#10B981;
-                            font-weight:600;">✓ {phase['label']}</div>""", unsafe_allow_html=True)
+                        col.markdown(f"<div style='text-align:center;font-size:0.7rem;color:#10B981;font-weight:600;'>✓ {phase['label']}</div>", unsafe_allow_html=True)
                     elif i == cur_idx:
-                        col.markdown(f"""<div style="text-align:center;font-size:0.7rem;color:{CIALONA_ORANGE};
-                            font-weight:600;">● {phase['label']}</div>""", unsafe_allow_html=True)
+                        col.markdown(f"<div style='text-align:center;font-size:0.7rem;color:{CIALONA_ORANGE};font-weight:600;'>● {phase['label']}</div>", unsafe_allow_html=True)
                     else:
-                        col.markdown(f"""<div style="text-align:center;font-size:0.7rem;color:#9CA3AF;">
-                            {phase['label']}</div>""", unsafe_allow_html=True)
+                        col.markdown(f"<div style='text-align:center;font-size:0.7rem;color:#9CA3AF;'>{phase['label']}</div>", unsafe_allow_html=True)
 
             # Logs (collapsed)
             with st.expander("Voortgang details", expanded=False):
