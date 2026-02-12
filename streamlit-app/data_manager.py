@@ -118,12 +118,21 @@ def import_discovery_result(discovery_output: dict) -> str:
     # Calculate completeness
     docs = discovery_output.get('documents', {})
     quality = discovery_output.get('quality', {})
+    schedule = discovery_output.get('schedule', {})
+
+    # Schedule is "found" if quality is strong/partial OR actual date entries exist
+    schedule_found = (
+        quality.get('schedule') in ('strong', 'partial')
+        or bool(schedule.get('build_up'))
+        or bool(schedule.get('tear_down'))
+        or bool(docs.get('schedule_page_url'))
+    )
 
     doc_status = {
         'floorplan': bool(docs.get('floorplan_url')),
         'exhibitor_manual': bool(docs.get('exhibitor_manual_url')),
         'rules': bool(docs.get('rules_url')),
-        'schedule': quality.get('schedule') == 'strong',
+        'schedule': schedule_found,
         'exhibitor_directory': bool(docs.get('exhibitor_directory_url')),
     }
 

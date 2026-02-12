@@ -779,6 +779,7 @@ class ClaudeAgent:
 
         found_pages_to_scan = []  # Pages found that we should also scan
         nav_pages_to_scan = []   # Navigation links from homepage (highest priority)
+        external_doc_nav = {}    # url → nav_link_text: external nav links whose text matches doc keywords
         all_internal_links_for_llm = []  # ALL internal links — LLM is the primary classifier
 
         # Create a lightweight browser for pre-scanning
@@ -821,10 +822,19 @@ class ClaudeAgent:
                             nav_links = await pre_scan_browser.extract_navigation_links()
                             for nav_link in nav_links:
                                 nav_host = urlparse(nav_link.url).netloc.lower()
-                                # Only follow same-domain navigation links
                                 if nav_host == base_netloc.lower():
+                                    # Same-domain: add to navigation scan list
                                     if nav_link.url not in urls_to_scan and nav_link.url not in nav_pages_to_scan:
                                         nav_pages_to_scan.append(nav_link.url)
+                                else:
+                                    # External: keep if link TEXT matches document keywords
+                                    # (e.g., Greentech "Floor plan" linking to rai-productie.rai.nl)
+                                    link_text_lower = (nav_link.text or '').lower()
+                                    if any(kw in link_text_lower for kw in doc_keywords):
+                                        if nav_link.url not in urls_to_scan and nav_link.url not in nav_pages_to_scan:
+                                            nav_pages_to_scan.append(nav_link.url)
+                                            external_doc_nav[nav_link.url] = nav_link.text
+                                            self._log(f"    🔗 External doc nav: '{nav_link.text}' → {nav_link.url[:70]}")
                             if nav_pages_to_scan:
                                 self._log(f"    🧭 Extracted {len(nav_pages_to_scan)} navigation links from homepage")
                         except Exception:
@@ -1277,35 +1287,58 @@ class ClaudeAgent:
 
                     relevant_links = await pre_scan_browser.get_relevant_links()
 
-                    # === EXTRACT PAGE CONTENT for fair-domain pages ===
+                    # === EXTRACT PAGE CONTENT for fair-domain pages + external doc nav links ===
                     # External portals get deep-scanned later; fair-domain HTML
                     # pages were never content-analysed (only their links were
                     # extracted). Fix: extract text + classify RIGHT HERE so the
                     # classifier can treat them identically to portal pages.
+                    # Also classify external pages that came from navigation links
+                    # with document-keyword text (e.g., "Floor plan" → rai-productie.rai.nl).
                     page_host = urlparse(url).netloc.lower()
                     is_fair_domain = (base_netloc.lower() in page_host)
-                    if is_fair_domain:
+                    is_ext_doc_nav = url in external_doc_nav
+                    if is_fair_domain or is_ext_doc_nav:
                         try:
                             page_state = await pre_scan_browser.get_state()
                             page_title = page_state.title if hasattr(page_state, 'title') else ''
                             page_text = await pre_scan_browser.extract_page_text(max_chars=10000)
                             if page_text and len(page_text.strip()) > 50:
                                 detected_type = self._detect_page_type(url, page_title, page_text)
+                                # Fallback: if content classification fails but nav text is clear, use nav text
+                                if detected_type == 'unknown' and is_ext_doc_nav:
+                                    nav_text = external_doc_nav[url]
+                                    detected_type = self._detect_page_type(url, nav_text, nav_text)
                                 if detected_type != 'unknown':
-                                    results['document_pages'].append({
+                                    page_entry = {
                                         'url': url,
                                         'text_content': page_text,
                                         'page_title': page_title,
                                         'detected_type': detected_type,
-                                    })
+                                    }
+                                    if is_ext_doc_nav:
+                                        page_entry['nav_confirmed'] = True
+                                    results['document_pages'].append(page_entry)
                                     self._log(f"    📝 Page [{detected_type}]: {page_title[:40] or url.split('/')[-1][:40]}")
-                                else:
-                                    # Store for LLM batch classification later
+                                elif is_fair_domain:
+                                    # Store for LLM batch classification later (only fair-domain)
                                     _pending_llm_pages.append({
                                         'url': url,
                                         'text_content': page_text,
                                         'page_title': page_title,
                                     })
+                            elif is_ext_doc_nav:
+                                # Thin/no content (e.g., interactive map iframe) but nav text says it's a doc
+                                nav_text = external_doc_nav[url]
+                                detected_type = self._detect_page_type(url, nav_text, nav_text)
+                                if detected_type != 'unknown':
+                                    results['document_pages'].append({
+                                        'url': url,
+                                        'text_content': f'Navigation: {nav_text}',
+                                        'page_title': nav_text,
+                                        'detected_type': detected_type,
+                                        'nav_confirmed': True,
+                                    })
+                                    self._log(f"    📝 External nav [{detected_type}]: '{nav_text}' → {url[:60]}")
                         except Exception:
                             pass
 

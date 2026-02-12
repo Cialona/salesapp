@@ -141,6 +141,28 @@ if active_jobs:
 
     st.markdown("")
 
+# ── Failed discoveries banner ────────────────────────────────────────────
+failed_jobs = [j for j in jm.get_completed_jobs() if j.status == "failed"]
+if failed_jobs:
+    nf = len(failed_jobs)
+    with st.container(border=True):
+        st.markdown(f"**{nf} discovery{'s' if nf > 1 else ''} mislukt**")
+        for fj in failed_jobs:
+            elapsed = int(fj.end_time - fj.start_time) if fj.end_time and fj.start_time else 0
+            e_mins, e_secs = divmod(elapsed, 60)
+            col_name, col_err, col_action = st.columns([2, 3, 1])
+            with col_name:
+                st.markdown(f":red[{fj.fair_name} {fj.fair_year}]")
+            with col_err:
+                err_msg = fj.error or "Onbekende fout"
+                # Truncate long error messages
+                if len(err_msg) > 80:
+                    err_msg = err_msg[:80] + "..."
+                st.caption(err_msg)
+            with col_action:
+                if st.button("Details", key=f"failed_{fj.job_id}"):
+                    st.switch_page("pages/1_Discovery.py")
+
 # ── Empty state: welcoming onboarding ────────────────────────────────────
 if not has_fairs:
     st.markdown("<br>", unsafe_allow_html=True)
