@@ -1668,6 +1668,28 @@ class ClaudeAgent:
                         except Exception:
                             pass  # Fall back to keyword-only sorting
 
+                    # Sort keyword_links by document-type priority: schedule/floorplan
+                    # links are rarer and more important for the quality gate, so they
+                    # should be visited first. Without this, portals with many exhibitor_
+                    # manual/rules links (like MWC with 10+ regulation pages) can push
+                    # schedule links past the [:8] cutoff.
+                    schedule_kws = get_title_keywords('schedule') + get_content_keywords('schedule')
+                    floorplan_kws = get_title_keywords('floorplan') + get_content_keywords('floorplan')
+                    rules_kws = get_title_keywords('rules')
+
+                    def _link_priority(lnk):
+                        """Lower = higher priority. Schedule first, then floorplan, then rules, then rest."""
+                        lt = (lnk.text or '').lower() + ' ' + lnk.url.lower()
+                        if any(kw in lt for kw in schedule_kws):
+                            return 0
+                        if any(kw in lt for kw in floorplan_kws):
+                            return 1
+                        if any(kw in lt for kw in rules_kws):
+                            return 2
+                        return 3
+
+                    keyword_links.sort(key=_link_priority)
+
                     # Follow keyword links first (up to 8), then remaining nav links (up to 4 more)
                     links_to_follow = keyword_links[:8] + other_links[:4]
 
