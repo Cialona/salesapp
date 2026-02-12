@@ -121,9 +121,9 @@ class ClassificationResult:
 
         type_search_hints = {
             'floorplan': [
-                'Check /maps of /floorplan pagina',
-                'Zoek naar "Hall plan", "Site map", "Venue map"',
-                'Soms te vinden op interactieve kaart pagina',
+                'Check /maps, /floorplan, /show-layout, /hall-plan pagina',
+                'Zoek naar "Hall plan", "Site map", "Venue map", "Show Layout", "Maps"',
+                'Soms te vinden op interactieve kaart pagina of als "Hall & site plan"',
             ],
             'exhibitor_manual': [
                 'Zoek naar "Exhibitor Manual", "Welcome Pack", "Exhibitor Guide", "Event Manual"',
@@ -201,6 +201,7 @@ class DocumentClassifier:
         target_year: str = "2026",
         exhibitor_pages: List[str] = None,
         portal_pages: List[Dict] = None,
+        fair_url: str = "",
     ) -> ClassificationResult:
         """
         Classify all found PDFs and portal pages, determine what's found vs missing.
@@ -323,10 +324,19 @@ class DocumentClassifier:
             best_directory = None
             best_score = -1
 
+            # Extract fair's base domain for cross-fair prevention
+            fair_base_domain = ''
+            if fair_url:
+                try:
+                    fair_base_domain = urlparse(fair_url).netloc.lower().replace('www.', '')
+                except Exception:
+                    pass
+
             for page in exhibitor_pages:
                 page_lower = page.lower()
-                # Use URL path for scoring (not hostname, to avoid false positives)
-                page_path = urlparse(page_lower).path.rstrip('/')
+                parsed_page = urlparse(page_lower)
+                page_host = parsed_page.netloc.replace('www.', '')
+                page_path = parsed_page.path.rstrip('/')
                 score = 0
 
                 # Strong directory indicators (high score)
@@ -348,6 +358,18 @@ class DocumentClassifier:
                                                     'checklist', 'register', 'login', 'dashboard', 'faq',
                                                     'shipping', 'marketing', 'contact', 'order', 'profile']):
                     score -= 3
+
+                # DOMAIN MATCHING: prevent cross-fair contamination
+                # Bonus for URLs on the same domain as the fair's website
+                if fair_base_domain and fair_base_domain in page_host:
+                    score += 8  # Strong bonus for same domain
+                elif fair_base_domain:
+                    # Check if ANY fair name keyword appears in the hostname
+                    # e.g., "mwcbarcelona" in URL when fair is "MWC 2026"
+                    host_has_fair_keyword = any(kw in page_host for kw in fair_keywords if len(kw) >= 4)
+                    if not host_has_fair_keyword:
+                        # Different domain without fair name → likely cross-fair contamination
+                        score -= 6
 
                 if score > best_score:
                     best_score = score
@@ -596,12 +618,18 @@ class DocumentClassifier:
                                               'event information', 'event guideline']):
                 score += 10
             if any(kw in combined for kw in ['rules and regulation', 'handbook', 'exhibitor guide',
+                                              # General/standard T&C = exhibitor manual (participation info)
+                                              'standard terms', 'general terms', 'general conditions',
+                                              'participation conditions', 'participation rules',
                                               # Dutch
                                               'algemene voorschriften', 'handleiding',
+                                              'algemene voorwaarden',
                                               # German
                                               'ausstellerhandbuch', 'allgemeine vorschriften',
+                                              'allgemeine geschäftsbedingung', 'teilnahmebedingung',
                                               # French
                                               'manuel exposant', 'guide exposant',
+                                              'conditions générales', 'conditions generales',
                                               ]):
                 score += 5
             # Penalty for very specific/niche pages
@@ -610,8 +638,11 @@ class DocumentClassifier:
         elif doc_type == 'rules':
             if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule',
                                               'design regulation', 'booth construction',
+                                              # Specific terms & conditions (fair-specific rules)
+                                              'specific terms', 'specific conditions',
                                               # Dutch
                                               'standbouw', 'bouwvoorschriften',
+                                              'specifieke voorwaarden',
                                               # German
                                               'standbauvorschrift', 'technische vorschrift',
                                               # French
@@ -625,9 +656,11 @@ class DocumentClassifier:
                                               'technische richtlinie',
                                               ]):
                 score += 5
-            # Penalty for general/broad documents when more specific exists
-            if any(kw in combined for kw in ['algemene', 'general', 'allgemeine', 'générale']):
-                score -= 3
+            # Penalty for general/standard documents — these are exhibitor_manual, not rules
+            if any(kw in combined for kw in ['algemene voorwaarden', 'general terms', 'standard terms',
+                                              'allgemeine geschäftsbedingung', 'conditions générales',
+                                              'participation condition']):
+                score -= 5
         elif doc_type == 'schedule':
             if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule', 'event schedule',
                                               'opbouw en afbouw', 'aufbau und abbau']):
@@ -637,8 +670,10 @@ class DocumentClassifier:
                 score += 5
         elif doc_type == 'floorplan':
             if any(kw in combined for kw in ['floorplan', 'floor plan', 'expocad', 'hall plan',
-                                              'expofp', 'mapyourshow',
-                                              'hallenplan', 'plattegrond', 'planimetria']):
+                                              'expofp', 'mapyourshow', 'show layout',
+                                              'venue map', 'site map', 'site plan', '/maps',
+                                              'hall & site plan', 'hall and site plan',
+                                              'hallenplan', 'plattegrond', 'geländeplan', 'planimetria']):
                 score += 10
 
         return score
@@ -669,8 +704,9 @@ class DocumentClassifier:
 
         if any(kw in combined for kw in [
             'floor plan', 'floorplan', 'hall plan', 'venue map', 'expo floorplan',
+            'show layout', 'site map', 'site plan', 'hall & site plan',
             'expocad', 'expofp', 'mapyourshow', 'map-dynamics',
-            'hallenplan', 'plattegrond', 'planimetria',
+            'hallenplan', 'plattegrond', 'geländeplan', 'planimetria',
         ]):
             return 'floorplan'
 
@@ -809,9 +845,9 @@ DOCUMENTEN:
 {pdf_list}
 
 Classificeer elk document in een van deze categorieën:
-- "floorplan": plattegrond, hallenplan, venue map, site plan, ExpoCad/ExpoFP link
-- "exhibitor_manual": exposanten handleiding, welcome pack, service documentation, exhibitor guide, Betriebstechnische Bestimmungen (BTB)
-- "rules": technische richtlijnen, regulations, construction rules, standbouw regels, Technische Richtlinien, voorschriften
+- "floorplan": plattegrond, hallenplan, venue map, site plan, show layout, hall & site plan, maps page, Geländeplan, ExpoCad/ExpoFP link
+- "exhibitor_manual": exposanten handleiding, welcome pack, service documentation, exhibitor guide, Betriebstechnische Bestimmungen (BTB), STANDARD/GENERAL terms and conditions (algemene voorwaarden, participation conditions, Allgemeine Geschäftsbedingungen)
+- "rules": technische richtlijnen, regulations, construction rules, standbouw regels, Technische Richtlinien, SPECIFIC terms and conditions (specifieke voorwaarden), voorschriften
 - "schedule": opbouw/afbouw schema, build-up/tear-down dates, move-in schedule, Aufbau/Abbau
 - "skip": niet relevant (bijv. privacy policy, cookie policy, sponsorship, marketing, visitor info)
 
@@ -1078,9 +1114,9 @@ Regels:
         - Organization name if found
         """
         type_descriptions = {
-            'floorplan': 'een plattegrond/floorplan met hal-indelingen, standnummers, of venue layout (ook interactieve plattegronden zoals ExpoCad)',
-            'exhibitor_manual': 'een exposanten handleiding/manual met informatie over standbouw, regels voor exposanten, of een "welcome pack"',
-            'rules': 'technische richtlijnen/regulations met constructie-eisen, elektra specificaties, of veiligheidsvoorschriften',
+            'floorplan': 'een plattegrond/floorplan met hal-indelingen, standnummers, of venue layout (ook interactieve plattegronden, "show layout", "maps", "hall & site plan", ExpoCad)',
+            'exhibitor_manual': 'een exposanten handleiding/manual met informatie over standbouw, regels voor exposanten, een "welcome pack", of STANDAARD/ALGEMENE voorwaarden (general terms and conditions, participation conditions)',
+            'rules': 'technische richtlijnen/regulations met constructie-eisen, elektra specificaties, veiligheidsvoorschriften, of SPECIFIEKE voorwaarden (specific terms and conditions van de beurs)',
             'schedule': 'een opbouw/afbouw schema met specifieke datums en tijden voor move-in/move-out',
         }
 
@@ -1283,7 +1319,8 @@ async def quick_classify_url(url: str) -> Tuple[str, str]:
     filename = url.split('/')[-1].lower()
 
     # Floorplan
-    if any(kw in url_lower for kw in ['floor', 'plan', 'map', 'hall', 'layout', 'plattegrond']):
+    if any(kw in url_lower for kw in ['floor', 'plan', 'map', 'hall', 'layout', 'plattegrond',
+                                       'show-layout', 'show_layout', '/maps', 'site-plan', 'venue-map']):
         return ('floorplan', 'weak')
 
     # Exhibitor manual
