@@ -716,6 +716,38 @@ class ClaudeAgent:
         seen = set()
         urls_to_scan = [x for x in urls_to_scan if not (x in seen or seen.add(x))]
 
+        # === LOCALE-AWARE REORDERING ===
+        # Generic paths are ordered English-first, but for .nl/.de/.it/.es/.fr
+        # domains, the matching language paths should be scanned FIRST.
+        # Without this, Dutch paths (position 80+) are never reached by the
+        # first-pass [:20] limit, causing chains like
+        # /standhouders → /standbouwers → /toegangsbeleid to be missed entirely.
+        tld = base_netloc.split('.')[-1].lower()
+        locale_suffixes = {
+            'nl': ['/standhouders', '/standbouwers', '/standhouders/standbouwers',
+                   '/nl/standhouders', '/nl/standbouwers', '/exposanten', '/nl/exposanten',
+                   '/deelnemers', '/nl/deelnemers', '/nl/diensten', '/nl/downloads',
+                   '/nl/deelnemen', '/deelnemen'],
+            'de': ['/de/aussteller', '/aussteller', '/de/teilnehmen', '/de/downloads',
+                   '/de/services', '/de/dienstleistungen'],
+            'fr': ['/fr/exposants', '/exposants', '/fr/participer', '/fr/services',
+                   '/fr/telechargements'],
+            'it': ['/it/espositori', '/espositori', '/it/partecipare', '/partecipare'],
+            'es': ['/es/expositores', '/expositores', '/es/participar', '/participar',
+                   '/es/servicios', '/es/descargas'],
+        }
+        if tld in locale_suffixes:
+            locale_urls = set()
+            for suffix in locale_suffixes[tld]:
+                locale_urls.add(f"{base_domain}{suffix}")
+            # Move locale-matching URLs to positions 2-N (right after homepage)
+            homepage = urls_to_scan[0] if urls_to_scan else None
+            matching = [u for u in urls_to_scan[1:] if u in locale_urls]
+            non_matching = [u for u in urls_to_scan[1:] if u not in locale_urls]
+            if matching:
+                urls_to_scan = ([homepage] if homepage else []) + matching + non_matching
+                self._log(f"  🌐 Locale '{tld}': promoted {len(matching)} language-matching paths")
+
         self._log(f"Pre-scan will check {len(urls_to_scan)} URLs (including {len(related_domains)} related domains)")
 
         # Keywords that indicate important document links
@@ -748,6 +780,21 @@ class ClaudeAgent:
                     await asyncio.sleep(0.5)  # Let JavaScript execute
 
                     current_state = await pre_scan_browser.get_state()
+
+                    # === REDIRECT TRACKING ===
+                    # If the browser redirected to a different domain (e.g.,
+                    # www.the-tire-cologne.com → www.thetire-cologne.com),
+                    # update base_netloc so all domain comparisons use the
+                    # actual landing domain instead of the original URL.
+                    if url_idx == 0:
+                        actual_url = current_state.url if hasattr(current_state, 'url') else ''
+                        if actual_url:
+                            actual_netloc = urlparse(actual_url).netloc
+                            if actual_netloc and actual_netloc.lower() != base_netloc.lower():
+                                self._log(f"  ↪ Redirect detected: {base_netloc} → {actual_netloc}")
+                                base_netloc = actual_netloc
+                                base_domain = f"{urlparse(actual_url).scheme}://{actual_netloc}"
+
                     self._log(f"  ✓ Scanning: {url}")
 
                     # === STRUCTURAL: Extract navigation links from the homepage ===
