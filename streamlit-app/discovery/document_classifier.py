@@ -611,6 +611,31 @@ class DocumentClassifier:
             elif classification.confidence == 'partial' and not existing:
                 setattr(result, mapped_type, classification)
                 self.log(f"  ~ Portal page [{mapped_type}]: partial")
+            elif mapped_type == 'schedule' and classification.confidence in ('none', 'weak'):
+                # Fallback for portal schedule pages: interactive portals (Salesforce, Cvent)
+                # often have schedule data in dynamically rendered tables that extract poorly.
+                # The page was already detected as schedule by _detect_page_type (via URL or
+                # content keywords). If the URL/title also matches schedule patterns, or if
+                # the original detected_type was explicitly 'schedule', assign PARTIAL so the
+                # page is eligible for LLM re-validation with portal context.
+                schedule_url_slugs = [
+                    'schedule', 'build-up', 'tear-down', 'dismantling', 'move-in',
+                    'move-out', 'deadlines', 'key-dates', 'timetable', 'set-up',
+                    'logistics', 'important-dates', 'access-policy', 'event-schedule',
+                ]
+                url_lower = page_url.lower()
+                page_title_lower = (page.get('page_title') or '').lower()
+                url_or_title = f"{url_lower} {page_title_lower}"
+                has_schedule_url = any(slug in url_or_title for slug in schedule_url_slugs)
+                was_detected_as_schedule = (detected_type == 'schedule')
+                if has_schedule_url or was_detected_as_schedule:
+                    original_conf = classification.confidence
+                    classification.confidence = 'partial'
+                    fallback_reason = 'URL-pattern' if has_schedule_url else 'detected_type'
+                    classification.reason = (classification.reason or '') + f' [portal schedule fallback: {fallback_reason}]'
+                    if not existing:
+                        setattr(result, mapped_type, classification)
+                        self.log(f"  ~ Portal schedule [{mapped_type}]: PARTIAL ({fallback_reason} fallback, LLM was {original_conf})")
 
         # Post-process: LLM-validated promotion of weak/partial portal pages.
         # If a page is from the same portal as a STRONG-classified document, we
@@ -619,9 +644,7 @@ class DocumentClassifier:
         for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
             cls = getattr(result, doc_type, None)
             if cls and cls.confidence == 'strong' and cls.year_verified and cls.url:
-                parsed = urlparse(cls.url)
-                path_parts = parsed.path.strip('/').split('/')
-                base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
+                base = self._get_portal_base(cls.url)
                 verified_portal_bases[base] = doc_type
 
         if verified_portal_bases:
@@ -634,9 +657,7 @@ class DocumentClassifier:
             for doc_type in ['exhibitor_manual', 'rules', 'schedule', 'floorplan']:
                 cls = getattr(result, doc_type, None)
                 if cls and cls.confidence in ('partial', 'weak') and cls.url:
-                    parsed = urlparse(cls.url)
-                    path_parts = parsed.path.strip('/').split('/')
-                    base = f"{parsed.netloc}/{path_parts[0]}" if path_parts else parsed.netloc
+                    base = self._get_portal_base(cls.url)
                     if base in verified_portal_bases:
                         verified_by = verified_portal_bases[base]
                         full_text = page_text_map.get(cls.url, cls.text_excerpt or '')
@@ -673,6 +694,25 @@ class DocumentClassifier:
                         result.exhibitor_manual = classification
                         self.log(f"  ✓ Portal home as exhibitor_manual: {classification.confidence}")
                         break
+
+    @staticmethod
+    def _get_portal_base(url: str) -> str:
+        """Extract portal base for grouping pages from the same portal.
+
+        For shared-host platforms (my.site.com, force.com, cvent.com), uses
+        host + first path segment to distinguish different portals on the same
+        host (e.g., gsma.my.site.com/mwcoem vs gsma.my.site.com/4yfnoem).
+
+        For dedicated portal domains (e.g., exhibitors-seg.seafoodexpo.com),
+        uses just the host since all pages belong to the same portal.
+        """
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip('/').split('/')
+        shared_hosts = ['my.site.com', 'force.com', 'cvent.com', 'swapcard.com']
+        is_shared = any(sh in parsed.netloc for sh in shared_hosts)
+        if is_shared and path_parts and path_parts[0]:
+            return f"{parsed.netloc}/{path_parts[0]}"
+        return parsed.netloc
 
     def _type_relevance_score(self, doc_type: str, url: str, title: str) -> int:
         """Score how well a URL/title matches a document type. Higher = better match.
