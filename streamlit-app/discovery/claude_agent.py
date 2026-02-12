@@ -1174,19 +1174,40 @@ class ClaudeAgent:
             # Second pass: scan discovered pages using BFS queue.
             # Pages discovered during scanning are added to the queue so we can
             # follow chains like /standhouders → /standbouwers → PDFs.
-            # Priority order: (1) keyword + LLM classified pages and external portals,
-            # (2) navigation links from homepage.
+            # Priority order: (1) high-relevance nav links (site structure +
+            # keywords), (2) keyword + LLM classified pages from first pass,
+            # (3) remaining nav links.
             scan_queue = []  # BFS queue
             seen_second_pass = set(urls_to_scan[:20])
 
-            # First add classified document pages and external portals (highest priority)
+            # Split nav links: those matching doc_keywords get FIRST priority
+            # (the site's own structure is the best guide, keyword match = likely relevant)
+            nav_high_priority = []
+            nav_low_priority = []
+            for nav_url in nav_pages_to_scan:
+                if nav_url in seen_second_pass:
+                    continue
+                lower_nav = nav_url.lower()
+                if any(kw in lower_nav for kw in doc_keywords):
+                    nav_high_priority.append(nav_url)
+                else:
+                    nav_low_priority.append(nav_url)
+
+            # (1) High-relevance navigation links (site structure + keyword match)
+            for nav_url in nav_high_priority:
+                scan_queue.append(nav_url)
+                seen_second_pass.add(nav_url)
+            if nav_high_priority:
+                self._log(f"  🧭 {len(nav_high_priority)} keyword-matching nav links get first priority")
+
+            # (2) Keyword + LLM classified pages from first pass
             for doc_url in found_pages_to_scan:
                 if doc_url not in seen_second_pass:
                     scan_queue.append(doc_url)
                     seen_second_pass.add(doc_url)
 
-            # Then add navigation links (site structure, fills remaining slots)
-            for nav_url in nav_pages_to_scan:
+            # (3) Remaining navigation links (fills remaining slots)
+            for nav_url in nav_low_priority:
                 if nav_url not in seen_second_pass:
                     scan_queue.append(nav_url)
                     seen_second_pass.add(nav_url)
@@ -1996,6 +2017,12 @@ Reply with ONLY a JSON array of objects, one per page. Example:
             'stand-build-rule', 'stand build rule', 'construction-rule',
             'reglement-technique', 'regolamento-tecnico', 'reglamento-tecnico',
             'technische-richtlijn', 'standbouwregels',
+            # Terms & conditions pages (general rules for exhibitors)
+            'terms-and-condition', 'terms_and_condition', 'terms and condition',
+            'algemene-voorwaarden', 'algemene voorwaarden', 'voorschriften',
+            'conditions-generales', 'conditions générales',
+            'allgemeine-geschaeftsbedingung', 'teilnahmebedingung',
+            'condizioni-generali',
         ]):
             return 'rules'
 
