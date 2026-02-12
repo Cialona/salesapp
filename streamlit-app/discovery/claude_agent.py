@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from typing import Optional, List, Dict, Any, Callable
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, quote_plus
 
 import anthropic
 
@@ -2594,12 +2594,52 @@ Reply with ONLY a JSON array of objects, one per page. Example:
         start_time = time.time()
 
         try:
-            # Validate: known_url is required for discovery
+            # If no known_url, try to find it via Google search using a temporary browser
             if not input_data.known_url:
-                self._log("❌ Geen website URL opgegeven voor deze beurs.")
-                self._log("   Discovery kan niet worden uitgevoerd zonder een bekende website URL.")
+                self._log("⚠️ Geen website URL opgegeven - probeer via Google te vinden...")
+                search_query = f"{input_data.fair_name} {input_data.city or ''} official website exhibitor".strip()
+                search_url = f"https://www.google.com/search?q={quote_plus(search_query)}"
+                search_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
+                try:
+                    await search_browser.launch()
+                    await search_browser.goto(search_url)
+                    await asyncio.sleep(2)
+                    # Extract first relevant result from Google
+                    page_text = await search_browser.get_page_text()
+                    if page_text:
+                        import re as _re
+                        # Find URLs that look like fair websites in Google results
+                        url_pattern = _re.compile(r'https?://(?:www\.)?([a-z0-9][-a-z0-9]*\.[a-z.]{2,})')
+                        skip_domains = {'google.com', 'google.nl', 'gstatic.com', 'googleapis.com',
+                                       'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
+                                       'linkedin.com', 'instagram.com', 'wikipedia.org', 'reddit.com',
+                                       'pinterest.com', 'tiktok.com'}
+                        for match in url_pattern.finditer(page_text):
+                            domain = match.group(1).lower()
+                            if not any(skip in domain for skip in skip_domains):
+                                found_url = match.group(0)
+                                self._log(f"   Google resultaat gevonden: {found_url}")
+                                input_data = type(input_data)(
+                                    fair_name=input_data.fair_name,
+                                    known_url=found_url,
+                                    city=input_data.city,
+                                    country=input_data.country,
+                                    client_name=input_data.client_name,
+                                )
+                                output.debug.notes.append(f"URL via Google gevonden: {found_url}")
+                                break
+                except Exception as e:
+                    self._log(f"   Google search mislukt: {e}")
+                finally:
+                    try:
+                        await search_browser.close()
+                    except Exception:
+                        pass
+
+            if not input_data.known_url:
+                self._log("❌ Geen website URL gevonden voor deze beurs.")
                 self._log("   Voeg een website URL toe aan de beurs en probeer opnieuw.")
-                output.debug.notes.append("Geen known_url opgegeven - discovery afgebroken")
+                output.debug.notes.append("Geen known_url opgegeven en niet via Google gevonden")
                 output.debug.discovery_log = list(self._discovery_log)
                 return output
 
