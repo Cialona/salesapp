@@ -260,10 +260,6 @@ if active:
 
         st.markdown("")  # spacing
 
-    # Auto-refresh while jobs are active
-    _time.sleep(2)
-    st.rerun()
-
 # ── Finished discoveries ─────────────────────────────────────────────────
 if finished:
     st.markdown("---")
@@ -411,3 +407,10 @@ with st.expander("JSON Importeren (voor beheerders)"):
 
         except json.JSONDecodeError as e:
             st.error(f"Ongeldige JSON: {e}")
+
+# ══════════════════════════════════════════════════════════════════════════
+# Auto-refresh: placed at the very end so ALL sections render before rerun
+# ══════════════════════════════════════════════════════════════════════════
+if active:
+    _time.sleep(2)
+    st.rerun()
