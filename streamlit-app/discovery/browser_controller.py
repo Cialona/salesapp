@@ -400,12 +400,24 @@ class BrowserController:
         await self._page.mouse.wheel(delta_x, delta_y)
         await self._page.wait_for_timeout(300)
 
-    async def goto(self, url: str) -> None:
-        """Navigate to URL."""
+    async def goto(self, url: str, timeout: int = 30000) -> None:
+        """Navigate to URL with retry on timeout."""
         if not self._page:
             raise RuntimeError("Browser not launched")
-        await self._page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        await self._page.wait_for_timeout(1000)
+        last_error = None
+        # Try up to 3 times with increasing timeouts
+        timeouts = [timeout, timeout * 2, timeout * 3]
+        for attempt, t in enumerate(timeouts, 1):
+            try:
+                await self._page.goto(url, wait_until='domcontentloaded', timeout=t)
+                await self._page.wait_for_timeout(1000)
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < len(timeouts):
+                    # Wait before retry
+                    await self._page.wait_for_timeout(2000)
+        raise last_error
 
     async def wait_for_navigation(self, timeout: int = 10000) -> None:
         """Wait for navigation to complete."""
