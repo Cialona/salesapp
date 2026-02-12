@@ -452,11 +452,18 @@ class DocumentClassifier:
             page_url = page.get('url', '')
 
             # Skip PDFs (handled separately) and pages without content
-            if page.get('is_pdf') or not text_content or len(text_content) < 100:
+            if page.get('is_pdf'):
                 continue
 
             detected_type = page.get('detected_type', 'unknown')
             mapped_type = type_mapping.get(detected_type)
+
+            # For floorplans, trust the detected_type even with minimal text —
+            # interactive floor plans (Salesforce portals, JS-rendered maps)
+            # have very little extractable text but ARE real floorplans.
+            is_floorplan = (mapped_type == 'floorplan')
+            if not text_content or (len(text_content) < 100 and not is_floorplan):
+                continue
 
             # If type is unknown, try to detect from content
             if not mapped_type:
@@ -468,7 +475,18 @@ class DocumentClassifier:
             # Known floorplan providers: auto-classify as STRONG without LLM
             # These are definitively floorplans regardless of text content
             known_floorplan_providers = ['expocad.com', 'a2zinc.net', 'mapyourshow.com', 'map-dynamics.', 'expofp.com']
-            if mapped_type == 'floorplan' and any(fp in page_url.lower() for fp in known_floorplan_providers):
+            # Also auto-accept floorplans on portal domains (Salesforce, etc.)
+            # when detected by portal scan — interactive maps have minimal text
+            portal_domains = ['my.site.com', 'force.com', 'cvent.com', 'swapcard.com']
+            is_portal_floorplan = (
+                mapped_type == 'floorplan'
+                and len(text_content or '') < 200
+                and any(pd in page_url.lower() for pd in portal_domains)
+            )
+            if mapped_type == 'floorplan' and (
+                any(fp in page_url.lower() for fp in known_floorplan_providers)
+                or is_portal_floorplan
+            ):
                 classification = DocumentClassification(
                     url=page_url,
                     document_type='floorplan',
