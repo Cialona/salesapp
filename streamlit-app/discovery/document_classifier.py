@@ -554,12 +554,27 @@ class DocumentClassifier:
             # Auto-accept docs confirmed by site navigation (fair's own menu labelled it)
             # e.g., Greentech "Floor plan" → rai-productie.rai.nl
             is_nav_confirmed = page.get('nav_confirmed', False)
+            # Auto-accept fair-domain floorplans whose URL matches a known floorplan
+            # URL pattern (e.g., /show-layout, /floorplan, /maps, /hall-plan).
+            # Interactive maps / image-based floorplans have minimal extractable text,
+            # so LLM validation often fails. The URL pattern is a strong enough signal.
+            floorplan_url_patterns = DOCUMENT_TYPES['floorplan'].get('url_patterns', [])
+            is_url_pattern_floorplan = (
+                mapped_type == 'floorplan'
+                and any(pat in page_url.lower() for pat in floorplan_url_patterns)
+            )
             if mapped_type == 'floorplan' and (
                 any(fp in page_url.lower() for fp in known_floorplan_providers)
                 or is_portal_floorplan
                 or is_nav_confirmed
+                or is_url_pattern_floorplan
             ):
-                reason = 'Navigation-confirmed floorplan' if is_nav_confirmed else 'Known floorplan provider (interactive)'
+                if is_nav_confirmed:
+                    reason = 'Navigation-confirmed floorplan'
+                elif is_url_pattern_floorplan:
+                    reason = 'URL-pattern floorplan (e.g., /show-layout, /floorplan)'
+                else:
+                    reason = 'Known floorplan provider (interactive)'
                 classification = DocumentClassification(
                     url=page_url,
                     document_type='floorplan',
@@ -608,6 +623,7 @@ class DocumentClassifier:
                 fair_name, fair_keywords, target_year,
                 page_title=page.get('page_title', ''),
                 city=city,
+                screenshot_base64=page.get('screenshot_base64'),
             )
 
             existing = getattr(result, mapped_type, None)
@@ -780,10 +796,15 @@ class DocumentClassifier:
         target_year: str,
         page_title: str = "",
         city: str = "",
+        screenshot_base64: str = None,
     ) -> DocumentClassification:
         """
         Validate a web page's content (same logic as _validate_pdf_strict but no PDF download).
         Used for portal pages, Salesforce sites, etc.
+
+        For floorplan pages, a screenshot can be provided for visual validation.
+        Interactive maps/images have little extractable text, so visual validation
+        is often the only way to confirm a floorplan.
         """
         classification = DocumentClassification(
             url=url,
@@ -793,6 +814,13 @@ class DocumentClassifier:
 
         try:
             if not text_content or len(text_content) < 100:
+                # Floorplans with a screenshot can still be validated visually
+                if expected_type == 'floorplan' and screenshot_base64:
+                    visual_result = await self._visual_validate_floorplan(
+                        url, screenshot_base64, fair_name, target_year, page_title
+                    )
+                    if visual_result:
+                        return visual_result
                 classification.reason = "Pagina bevat te weinig tekst"
                 return classification
 
@@ -862,11 +890,112 @@ class DocumentClassifier:
             else:
                 classification.confidence = 'none'
 
+            # Visual fallback for floorplans: text-based validation often fails
+            # because interactive maps/images have promotional text, not map data.
+            # Use the screenshot to visually confirm it's a floorplan.
+            if (expected_type == 'floorplan'
+                    and classification.confidence in ('none', 'weak')
+                    and screenshot_base64):
+                self.log(f"  📸 Text validation gave '{classification.confidence}' for floorplan, trying visual...")
+                visual_result = await self._visual_validate_floorplan(
+                    url, screenshot_base64, fair_name, target_year, page_title
+                )
+                if visual_result:
+                    return visual_result
+
         except Exception as e:
             classification.reason = f"Portal page validatie fout: {str(e)}"
             classification.confidence = 'none'
 
         return classification
+
+    async def _visual_validate_floorplan(
+        self,
+        url: str,
+        screenshot_base64: str,
+        fair_name: str,
+        target_year: str,
+        page_title: str = "",
+    ) -> DocumentClassification | None:
+        """
+        Visually validate a floorplan page using a screenshot.
+
+        Floorplans are often interactive maps, images, or iframes with very little
+        extractable text. This method sends a screenshot to the LLM to visually
+        confirm whether the page shows a floor plan / hall layout.
+
+        Returns a DocumentClassification with STRONG confidence if confirmed,
+        or None if the visual check fails.
+        """
+        try:
+            prompt = (
+                f'This is a screenshot of a page from the "{fair_name}" trade fair website.\n'
+                f'URL: {url}\n'
+                f'Page title: {page_title}\n\n'
+                'Does this page show an exhibition FLOOR PLAN, HALL LAYOUT MAP, '
+                'or interactive VENUE MAP showing booth/stand positions?\n\n'
+                'Look for: maps with booth numbers, hall outlines, stand positions, '
+                'interactive venue layouts, or even a page that clearly links to or '
+                'frames such a map.\n\n'
+                'Respond with ONLY a JSON object:\n'
+                '{"is_floorplan": true/false, "reason": "brief explanation"}'
+            )
+
+            response = self.client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": screenshot_base64,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            )
+
+            response_text = response.content[0].text.strip()
+
+            # Parse JSON response
+            import json as _json
+            # Handle markdown code blocks
+            if '```' in response_text:
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+
+            result = _json.loads(response_text)
+            is_floorplan = result.get('is_floorplan', False)
+            reason = result.get('reason', '')
+
+            if is_floorplan:
+                self.log(f"  ✓ Visual floorplan confirmed: {reason}")
+                return DocumentClassification(
+                    url=url,
+                    document_type='floorplan',
+                    confidence='strong',
+                    title=page_title or 'Visual floorplan',
+                    reason=f'Visual validation: {reason}',
+                    is_validated=True,
+                    year_verified=True,
+                    fair_verified=True,
+                    content_verified=True,
+                    text_excerpt=f'[Screenshot validated] {page_title}',
+                )
+            else:
+                self.log(f"  ✗ Visual check: not a floorplan ({reason})")
+                return None
+
+        except Exception as e:
+            self.log(f"  ⚠️ Visual validation failed: {e}")
+            return None
 
     async def _revalidate_with_portal_context(
         self,

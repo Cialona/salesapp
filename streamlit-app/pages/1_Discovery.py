@@ -199,10 +199,19 @@ with col_info:
 
 # Collect all jobs for this session (single lookup per job)
 my_jobs = []
+seen_job_ids = set()
 for _jid in st.session_state.my_job_ids:
     _j = jm.get_job(_jid)
     if _j:
         my_jobs.append(_j)
+        seen_job_ids.add(_jid)
+
+# Also include active jobs not in my_job_ids (e.g. after page refresh/navigation)
+for _aj in jm.get_active_jobs():
+    if _aj.job_id not in seen_job_ids:
+        my_jobs.append(_aj)
+        seen_job_ids.add(_aj.job_id)
+        st.session_state.my_job_ids.append(_aj.job_id)
 
 # Split into active and finished
 active = [j for j in my_jobs if j.status in ("pending", "running")]

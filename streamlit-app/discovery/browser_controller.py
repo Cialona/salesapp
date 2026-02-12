@@ -671,7 +671,7 @@ class BrowserController:
             'hall', 'schedule', 'timeline', 'directory', 'service', 'documentation',
             'set-up', 'dismantl', 'build-up', 'tear-down', 'construction', 'regulation',
             'provision', 'sustainable', 'stand design', 'booth', 'catalogue', 'catalog',
-            'participate', 'preparation', 'planning', 'contractor',
+            'participate', 'preparation', 'planning', 'contractor', 'layout',
             # German
             'aussteller', 'richtlinie', 'handbuch', 'leitfaden', 'technisch', 'gelände',
             'hallen', 'zeitplan', 'aufbau', 'abbau', 'standbau', 'verzeichnis',
