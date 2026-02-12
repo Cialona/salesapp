@@ -76,6 +76,8 @@ export const FIELD_KEYWORDS = {
   floorplan: [
     'floor plan', 'floorplan', 'hall plan', 'hallenplan', 'plattegrond',
     'site map', 'venue map', 'layout', 'stand location', 'exhibition layout',
+    'show layout', 'maps', 'geländeplan', 'site plan', 'venue layout',
+    'hall & site plan', 'hall and site plan',
   ],
   exhibitor_manual: [
     'exhibitor manual', 'exhibitor handbook', 'exhibitor guide', 'service manual',

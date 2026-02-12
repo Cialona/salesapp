@@ -24,6 +24,17 @@ from urllib.parse import urlparse
 import urllib.request
 import urllib.error
 
+# Central document type registry — single source of truth
+from discovery.document_types import (
+    DOCUMENT_TYPES,
+    get_known_floorplan_providers,
+    get_content_keywords,
+    get_title_keywords,
+    get_scoring_keywords,
+    get_type_search_hints,
+    get_llm_classification_prompt,
+)
+
 # Try to import PDF library
 try:
     import pypdf
@@ -119,34 +130,10 @@ class ClassificationResult:
             'schedule': 'Opbouw/afbouw schema met datums en tijden',
         }
 
+        # Search hints from central document_types registry
         type_search_hints = {
-            'floorplan': [
-                'Check /maps of /floorplan pagina',
-                'Zoek naar "Hall plan", "Site map", "Venue map"',
-                'Soms te vinden op interactieve kaart pagina',
-            ],
-            'exhibitor_manual': [
-                'Zoek naar "Exhibitor Manual", "Welcome Pack", "Exhibitor Guide", "Event Manual"',
-                'Check externe portals (Salesforce/my.site.com, OEM)',
-                'Vaak achter "Downloads" of "Exhibitor Resources" sectie',
-                'Probeer web search: "[beursnaam] exhibitor welcome pack PDF"',
-            ],
-            'rules': [
-                'Zoek naar "Technical Guidelines", "Stand Construction Rules", "Technical Regulations"',
-                'NIET zoeken naar venue-specifieke regels (bijv. Fira Barcelona algemene regels)',
-                'Check of het exhibitor manual/welcome pack ook technische regels bevat',
-                'Vaak te vinden als aparte PDF op de download pagina',
-            ],
-            'schedule': [
-                'Check of het exhibitor manual ook opbouw/afbouw schema bevat',
-                'Zoek naar "Build-up schedule", "Move-in dates", "Set-up and dismantling"',
-                'Soms te vinden op de "Practical Information" of "Planning" pagina',
-                'Kijk naar de agenda/programma pagina voor beursdatums',
-            ],
-            'exhibitor_directory': [
-                'Zoek naar /exhibitors, /catalogue, exhibitor lijst',
-                'Soms op een apart subdomein: exhibitors.[domain]',
-            ],
+            doc_type: get_type_search_hints(doc_type)
+            for doc_type in DOCUMENT_TYPES
         }
 
         lines = ["NOG TE VINDEN (focus hierop):"]
@@ -201,6 +188,7 @@ class DocumentClassifier:
         target_year: str = "2026",
         exhibitor_pages: List[str] = None,
         portal_pages: List[Dict] = None,
+        fair_url: str = "",
     ) -> ClassificationResult:
         """
         Classify all found PDFs and portal pages, determine what's found vs missing.
@@ -323,10 +311,19 @@ class DocumentClassifier:
             best_directory = None
             best_score = -1
 
+            # Extract fair's base domain for cross-fair prevention
+            fair_base_domain = ''
+            if fair_url:
+                try:
+                    fair_base_domain = urlparse(fair_url).netloc.lower().replace('www.', '')
+                except Exception:
+                    pass
+
             for page in exhibitor_pages:
                 page_lower = page.lower()
-                # Use URL path for scoring (not hostname, to avoid false positives)
-                page_path = urlparse(page_lower).path.rstrip('/')
+                parsed_page = urlparse(page_lower)
+                page_host = parsed_page.netloc.replace('www.', '')
+                page_path = parsed_page.path.rstrip('/')
                 score = 0
 
                 # Strong directory indicators (high score)
@@ -348,6 +345,18 @@ class DocumentClassifier:
                                                     'checklist', 'register', 'login', 'dashboard', 'faq',
                                                     'shipping', 'marketing', 'contact', 'order', 'profile']):
                     score -= 3
+
+                # DOMAIN MATCHING: prevent cross-fair contamination
+                # Bonus for URLs on the same domain as the fair's website
+                if fair_base_domain and fair_base_domain in page_host:
+                    score += 8  # Strong bonus for same domain
+                elif fair_base_domain:
+                    # Check if ANY fair name keyword appears in the hostname
+                    # e.g., "mwcbarcelona" in URL when fair is "MWC 2026"
+                    host_has_fair_keyword = any(kw in page_host for kw in fair_keywords if len(kw) >= 4)
+                    if not host_has_fair_keyword:
+                        # Different domain without fair name → likely cross-fair contamination
+                        score -= 6
 
                 if score > best_score:
                     best_score = score
@@ -474,7 +483,7 @@ class DocumentClassifier:
 
             # Known floorplan providers: auto-classify as STRONG without LLM
             # These are definitively floorplans regardless of text content
-            known_floorplan_providers = ['expocad.com', 'a2zinc.net', 'mapyourshow.com', 'map-dynamics.', 'expofp.com']
+            known_floorplan_providers = get_known_floorplan_providers()
             # Also auto-accept floorplans on portal domains (Salesforce, etc.)
             # when detected by portal scan — interactive maps have minimal text
             portal_domains = ['my.site.com', 'force.com', 'cvent.com', 'swapcard.com']
@@ -586,93 +595,32 @@ class DocumentClassifier:
                         break
 
     def _type_relevance_score(self, doc_type: str, url: str, title: str) -> int:
-        """Score how well a URL/title matches a document type. Higher = better match."""
+        """Score how well a URL/title matches a document type. Higher = better match.
+        Uses scoring_keywords from central document_types registry.
+        """
         combined = f"{url} {title}".lower()
         score = 0
 
-        if doc_type == 'exhibitor_manual':
-            # Strong indicators for exhibitor manual
-            if any(kw in combined for kw in ['event rules', 'exhibitor manual', 'welcome pack', 'event manual',
-                                              'event information', 'event guideline']):
-                score += 10
-            if any(kw in combined for kw in ['rules and regulation', 'handbook', 'exhibitor guide',
-                                              # Dutch
-                                              'algemene voorschriften', 'handleiding',
-                                              # German
-                                              'ausstellerhandbuch', 'allgemeine vorschriften',
-                                              # French
-                                              'manuel exposant', 'guide exposant',
-                                              ]):
-                score += 5
-            # Penalty for very specific/niche pages
-            if any(kw in combined for kw in ['vehicle access', 'parking', 'catering', 'restaurant', 'accreditation']):
-                score -= 5
-        elif doc_type == 'rules':
-            if any(kw in combined for kw in ['stand build rule', 'technical regulation', 'construction rule',
-                                              'design regulation', 'booth construction',
-                                              # Dutch
-                                              'standbouw', 'bouwvoorschriften',
-                                              # German
-                                              'standbauvorschrift', 'technische vorschrift',
-                                              # French
-                                              'reglement technique',
-                                              ]):
-                score += 10
-            if any(kw in combined for kw in ['technical guideline', 'stand design', 'design rule',
-                                              # Dutch
-                                              'technische richtlijn',
-                                              # German
-                                              'technische richtlinie',
-                                              ]):
-                score += 5
-            # Penalty for general/broad documents when more specific exists
-            if any(kw in combined for kw in ['algemene', 'general', 'allgemeine', 'générale']):
-                score -= 3
-        elif doc_type == 'schedule':
-            if any(kw in combined for kw in ['build up and dismantling schedule', 'build-up schedule', 'event schedule',
-                                              'opbouw en afbouw', 'aufbau und abbau']):
-                score += 10
-            if any(kw in combined for kw in ['schedule', 'timing', 'move-in', 'deadline',
-                                              'opbouw', 'afbouw', 'aufbau', 'abbau']):
-                score += 5
-        elif doc_type == 'floorplan':
-            if any(kw in combined for kw in ['floorplan', 'floor plan', 'expocad', 'hall plan',
-                                              'expofp', 'mapyourshow',
-                                              'hallenplan', 'plattegrond', 'planimetria']):
-                score += 10
+        scoring = get_scoring_keywords(doc_type)
+        if any(kw in combined for kw in scoring.get('strong', [])):
+            score += 10
+        if any(kw in combined for kw in scoring.get('medium', [])):
+            score += 5
+        if any(kw in combined for kw in scoring.get('penalties', [])):
+            score -= 5
 
         return score
 
     def _detect_content_type(self, url: str, text: str) -> Optional[str]:
-        """Detect document type from page URL and content."""
+        """Detect document type from page URL and content.
+        Uses content_keywords from central document_types registry.
+        """
         combined = f"{url} {text[:1500]}".lower()
 
-        if any(kw in combined for kw in [
-            'stand build rule', 'construction rule', 'technical guideline',
-            'technical regulation', 'design regulation', 'design rule',
-            'technical specification', 'height limit', 'fire safety',
-            'electrical requirement', 'stand design rule',
-            'reglement technique', 'regolamento tecnico', 'reglamento tecnico',
-            'technische richtlijn', 'standbouwregels',
-        ]):
-            return 'rules'
-
-        if any(kw in combined for kw in [
-            'event schedule', 'build-up schedule', 'dismantling schedule',
-            'tear-down', 'move-in schedule', 'set-up and dismantl',
-            'build up & dismantl', 'installation & dismantl',
-            'setup and dismantle', 'setup & dismantle',
-            'montage et démontage', 'montaje y desmontaje',
-            'allestimento e smontaggio', 'opbouw en afbouw',
-        ]):
-            return 'schedule'
-
-        if any(kw in combined for kw in [
-            'floor plan', 'floorplan', 'hall plan', 'venue map', 'expo floorplan',
-            'expocad', 'expofp', 'mapyourshow', 'map-dynamics',
-            'hallenplan', 'plattegrond', 'planimetria',
-        ]):
-            return 'floorplan'
+        # Check each document type's content keywords (from central registry)
+        for doc_type in ['rules', 'schedule', 'floorplan']:
+            if any(kw in combined for kw in get_content_keywords(doc_type)):
+                return doc_type
 
         return None
 
@@ -803,17 +751,15 @@ class DocumentClassifier:
 
         pdf_list = "\n".join(pdf_entries)
 
-        prompt = f"""Classificeer deze PDF documenten voor de beurs "{fair_name}" ({target_year}).
+        # Generate classification prompt from central registry
+        classification_intro = get_llm_classification_prompt(fair_name, context='pdfs')
 
-DOCUMENTEN:
+        prompt = f"""{classification_intro}
+
+DOCUMENTEN ({target_year}):
 {pdf_list}
 
-Classificeer elk document in een van deze categorieën:
-- "floorplan": plattegrond, hallenplan, venue map, site plan, ExpoCad/ExpoFP link
-- "exhibitor_manual": exposanten handleiding, welcome pack, service documentation, exhibitor guide, Betriebstechnische Bestimmungen (BTB)
-- "rules": technische richtlijnen, regulations, construction rules, standbouw regels, Technische Richtlinien, voorschriften
-- "schedule": opbouw/afbouw schema, build-up/tear-down dates, move-in schedule, Aufbau/Abbau
-- "skip": niet relevant (bijv. privacy policy, cookie policy, sponsorship, marketing, visitor info)
+Classificeer elk document in een van de bovenstaande categorieën.
 
 Antwoord ALLEEN met valide JSON - een object met document indices per categorie:
 {{
@@ -884,7 +830,9 @@ Regels:
             return self._keyword_classify_pdfs(pdf_links)
 
     def _keyword_classify_pdfs(self, pdf_links: List[Dict]) -> Dict[str, List[Dict]]:
-        """Fallback: keyword-based classification if LLM batch fails."""
+        """Fallback: keyword-based classification if LLM batch fails.
+        Uses pdf_keywords from central document_types registry.
+        """
         candidates = {
             'floorplan': [],
             'exhibitor_manual': [],
@@ -897,14 +845,15 @@ Regels:
             text = pdf.get('text', '') if isinstance(pdf, dict) else ''
             combined = f"{url.lower()} {text.lower()}"
 
-            if any(kw in combined for kw in ['floor', 'plan', 'map', 'hall', 'plattegrond', 'layout', 'hallen']):
-                candidates['floorplan'].append(pdf)
-            if any(kw in combined for kw in ['exhibitor', 'manual', 'welcome', 'handbook', 'guide', 'aussteller', 'btb']):
-                candidates['exhibitor_manual'].append(pdf)
-            if any(kw in combined for kw in ['technical', 'regulation', 'rule', 'guideline', 'richtlini', 'vorschrift', 'technis']):
-                candidates['rules'].append(pdf)
-            if any(kw in combined for kw in ['schedule', 'timing', 'build-up', 'tear-down', 'aufbau', 'abbau', 'opbouw', 'afbouw']):
-                candidates['schedule'].append(pdf)
+            for doc_type in candidates:
+                pdf_kws = get_pdf_keywords(doc_type)
+                if pdf_kws and any(kw in combined for kw in pdf_kws):
+                    # For floorplan, check exclusions
+                    if doc_type == 'floorplan':
+                        exclusions = get_pdf_exclusions(doc_type)
+                        if any(excl in combined for excl in exclusions):
+                            continue
+                    candidates[doc_type].append(pdf)
 
         return candidates
 
@@ -1077,14 +1026,9 @@ Regels:
         - Contact emails/phones if found
         - Organization name if found
         """
-        type_descriptions = {
-            'floorplan': 'een plattegrond/floorplan met hal-indelingen, standnummers, of venue layout (ook interactieve plattegronden zoals ExpoCad)',
-            'exhibitor_manual': 'een exposanten handleiding/manual met informatie over standbouw, regels voor exposanten, of een "welcome pack"',
-            'rules': 'technische richtlijnen/regulations met constructie-eisen, elektra specificaties, of veiligheidsvoorschriften',
-            'schedule': 'een opbouw/afbouw schema met specifieke datums en tijden voor move-in/move-out',
-        }
-
-        expected_desc = type_descriptions.get(expected_type, expected_type)
+        # Use semantic descriptions from central document_types registry
+        type_def = DOCUMENT_TYPES.get(expected_type, {})
+        expected_desc = type_def.get('llm_description', expected_type)
 
         prompt = f"""Analyseer dit document GRONDIG en extraheer ALLE informatie.
 
@@ -1283,7 +1227,8 @@ async def quick_classify_url(url: str) -> Tuple[str, str]:
     filename = url.split('/')[-1].lower()
 
     # Floorplan
-    if any(kw in url_lower for kw in ['floor', 'plan', 'map', 'hall', 'layout', 'plattegrond']):
+    if any(kw in url_lower for kw in ['floor', 'plan', 'map', 'hall', 'layout', 'plattegrond',
+                                       'show-layout', 'show_layout', '/maps', 'site-plan', 'venue-map']):
         return ('floorplan', 'weak')
 
     # Exhibitor manual
