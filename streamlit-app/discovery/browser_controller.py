@@ -707,11 +707,36 @@ class BrowserController:
         regardless of whether they match document keywords. This helps discover
         pages like "Show Layout", "Exhibiting", "Stand Build" that may not match
         hardcoded keyword patterns.
+
+        Also triggers hover/mouseenter on top-level navigation items to reveal
+        dropdown/mega-menu content that is hidden until hover.
         """
         if not self._page:
             return []
 
         try:
+            # First trigger hover on top-level nav items to reveal dropdown menus.
+            # Many trade fair sites use mega-menus that only render/show content on hover.
+            await self._page.evaluate('''() => {
+                const topLevelSelectors = [
+                    'nav > ul > li', 'nav > div > ul > li',
+                    'header nav li.has-children', 'header nav li.has-submenu',
+                    'header nav li.dropdown', 'header nav li.menu-item-has-children',
+                    '.main-nav > ul > li', '.navbar-nav > li',
+                    '[role="navigation"] > ul > li',
+                    'header .menu > li', 'header .nav > li',
+                ];
+                for (const sel of topLevelSelectors) {
+                    try {
+                        document.querySelectorAll(sel).forEach(el => {
+                            el.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+                            el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+                        });
+                    } catch(e) {}
+                }
+            }''')
+            await asyncio.sleep(0.3)  # Let dropdowns render
+
             nav_links = await self._page.evaluate('''() => {
                 const results = [];
                 const seen = new Set();
