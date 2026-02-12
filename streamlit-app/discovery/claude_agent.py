@@ -572,7 +572,7 @@ class ClaudeAgent:
         # Search the web to find exhibitor manuals/portals that may not be linked from main site
         if fair_name:
             self._log(f"🔍 Searching web for exhibitor portals: {fair_name}...")
-            web_search_results = await self._web_search_for_portals(fair_name)
+            web_search_results = await self._web_search_for_portals(fair_name, fair_url=base_url)
             self._sd['web_search_pdfs'] = len(web_search_results.get('pdf_links', []))
             self._sd['web_search_portals'] = len(web_search_results.get('portal_urls', []))
 
@@ -726,13 +726,13 @@ class ClaudeAgent:
             'floor', 'plan', 'hall', 'gelaende', 'exhibitor', 'aussteller',
             # Dutch terms
             'standbouw', 'standhouder', 'opbouw', 'afbouw', 'toegang',
-            # English: contractor pages (stand builders, EAC info)
-            'contractor',
+            # English: contractor pages, terms & conditions
+            'contractor', 'terms-and-condition', 'terms_and_condition',
         ]
 
         found_pages_to_scan = []  # Pages found that we should also scan
         nav_pages_to_scan = []   # Navigation links from homepage (highest priority)
-        unmatched_internal_links = []  # Internal links not matched by keywords — for LLM classification
+        all_internal_links_for_llm = []  # ALL internal links — LLM is the primary classifier
 
         # Create a lightweight browser for pre-scanning
         pre_scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)  # Smaller viewport for speed
@@ -1053,25 +1053,23 @@ class ClaudeAgent:
                             # Dutch: stand builder pages, setup/teardown schedules
                             'standhouder', 'standbouwer', 'opbouw', 'afbouw',
                             'op-en-afbouw', 'toegangsbeleid',
-                            # English: contractor / EAC pages
-                            'contractor',
+                            # English: contractor / EAC pages, terms & conditions
+                            'contractor', 'terms-and-condition',
                         ])
 
+                        # Keyword fast-path: reliably catches known patterns
                         if url_has_keyword or text_has_keyword or is_document_page:
                             if link.url not in results['exhibitor_pages']:
                                 results['exhibitor_pages'].append(link.url)
 
-                                # Allow same domain or related exhibitor portals
-                                # More permissive to catch event-specific portals like exhibitors-seg.seafoodexpo.com
                                 link_host = urlparse(link.url).netloc.lower()
                                 is_related_domain = (
-                                    base_netloc in link.url or  # Same domain
-                                    '/content/dam/' in link.url or  # CMS content
+                                    base_netloc in link.url or
+                                    '/content/dam/' in link.url or
                                     any(pattern in link_host for pattern in [
                                         'exhibitor', 'aussteller', 'espositori', 'exposant',
                                         'portal', 'services', 'booth', 'stand'
                                     ]) or
-                                    # Check if shares root domain
                                     (len(base_netloc.split('.')) >= 2 and
                                      '.'.join(base_netloc.split('.')[-2:]) in link_host)
                                 )
@@ -1079,42 +1077,42 @@ class ClaudeAgent:
                                 if is_related_domain and link.url not in urls_to_scan:
                                     found_pages_to_scan.append(link.url)
                                     self._log(f"    🔗 Found document page: {link.text[:30] if link.text else link.url[:40]}...")
-                        else:
-                            # Collect unmatched INTERNAL links for LLM classification later.
-                            # Only same-domain links with meaningful text, to avoid noise.
-                            link_host = urlparse(link.url).netloc.lower()
-                            is_same_domain = (base_netloc.lower() in link_host)
-                            has_meaningful_text = lower_text and len(lower_text) >= 3
-                            if (is_same_domain and has_meaningful_text
-                                    and link.url not in results['exhibitor_pages']
-                                    and link.url not in [u for u in found_pages_to_scan]):
-                                unmatched_internal_links.append({
-                                    'url': link.url,
-                                    'text': link.text[:80] if link.text else '',
-                                })
+
+                        # LLM primary classifier: collect ALL internal links.
+                        # Keywords above are a fast baseline; the LLM catches everything
+                        # else in any language without needing new keywords each time.
+                        link_host = urlparse(link.url).netloc.lower()
+                        is_same_domain = (base_netloc.lower() in link_host)
+                        if (is_same_domain
+                                and link.url not in results['exhibitor_pages']
+                                and link.url not in found_pages_to_scan):
+                            all_internal_links_for_llm.append({
+                                'url': link.url,
+                                'text': link.text[:80] if link.text else '',
+                            })
 
                 except Exception as e:
                     # Silently skip failed URLs
                     continue
 
-            # === LLM safety net: classify unmatched internal links ===
-            # Keywords are fast but brittle. Send remaining internal links to Haiku
-            # in a single batch to catch pages in any language/terminology.
-            if unmatched_internal_links:
+            # === LLM primary link classifier ===
+            # The LLM is the PRIMARY classifier — it decides which internal
+            # pages are relevant, in ANY language, without needing keywords.
+            # Keywords above serve as a fast-path baseline only.
+            if all_internal_links_for_llm:
                 # Deduplicate
-                seen_unmatched = set()
-                unique_unmatched = []
-                for lnk in unmatched_internal_links:
+                seen_llm = set()
+                unique_llm_links = []
+                for lnk in all_internal_links_for_llm:
                     canon = lnk['url'].split('#')[0].rstrip('/')
-                    if canon not in seen_unmatched:
-                        seen_unmatched.add(canon)
-                        unique_unmatched.append(lnk)
+                    if canon not in seen_llm:
+                        seen_llm.add(canon)
+                        unique_llm_links.append(lnk)
 
-                # Only classify if there are candidates and not too many
-                if 1 <= len(unique_unmatched) <= 120:
+                if 1 <= len(unique_llm_links) <= 150:
                     try:
                         llm_found = await self._llm_classify_prescan_links(
-                            unique_unmatched, fair_name=fair_name
+                            unique_llm_links, fair_name=fair_name
                         )
                         for llm_url in llm_found:
                             if llm_url not in [u for u in found_pages_to_scan]:
@@ -1122,19 +1120,19 @@ class ClaudeAgent:
                                 if llm_url not in results['exhibitor_pages']:
                                     results['exhibitor_pages'].append(llm_url)
                         if llm_found:
-                            self._log(f"    🤖 LLM classified {len(llm_found)} extra relevant page(s) from {len(unique_unmatched)} candidates")
+                            self._log(f"    🤖 LLM classified {len(llm_found)} relevant page(s) from {len(unique_llm_links)} internal links")
                     except Exception as e:
                         self._log(f"    ⚠️ LLM link classification failed: {e}")
 
             # Second pass: scan discovered pages using BFS queue.
             # Pages discovered during scanning are added to the queue so we can
             # follow chains like /standhouders → /standbouwers → PDFs.
-            # Priority order: (1) keyword-matched document pages and external portals,
+            # Priority order: (1) keyword + LLM classified pages and external portals,
             # (2) navigation links from homepage.
             scan_queue = []  # BFS queue
             seen_second_pass = set(urls_to_scan[:20])
 
-            # First add keyword-matched document pages and external portals (highest priority)
+            # First add classified document pages and external portals (highest priority)
             for doc_url in found_pages_to_scan:
                 if doc_url not in seen_second_pass:
                     scan_queue.append(doc_url)
@@ -1253,9 +1251,10 @@ class ClaudeAgent:
                                 year_info = f" [{doc_year}]" if doc_year else ""
                                 self._log(f"    ⭐ High-value{year_info} (2nd): {link.text[:40]}...")
 
-                    # Discover internal doc-type pages and ADD THEM TO THE QUEUE
-                    # so they get scanned too (BFS). This allows chains like:
-                    # /standhouders → /standbouwers → toegangsbeleid PDFs
+                    # Discover internal pages and ADD THEM TO THE BFS QUEUE.
+                    # Pages in the second pass were already selected by the LLM in
+                    # the first pass, so their exhibitor links are likely relevant too.
+                    # No keyword gate needed — max_second_pass cap prevents runaway.
                     for link in relevant_links.get('exhibitor_links', []):
                         if link.url.lower().endswith('.pdf'):
                             continue
@@ -1263,22 +1262,9 @@ class ClaudeAgent:
                         if base_netloc.lower() not in link_host:
                             continue
                         if link.url not in seen_second_pass:
-                            # Check if this looks like a doc page worth scanning
-                            link_lower = link.url.lower()
-                            link_text_lower = (link.text or '').lower()
-                            is_doc_link = (
-                                any(kw in link_lower for kw in doc_keywords) or
-                                any(kw in link_text_lower for kw in doc_keywords) or
-                                any(pattern in link_lower for pattern in [
-                                    'standbouw', 'standhouder', 'contractor', 'opbouw',
-                                    'afbouw', 'toegangsbeleid', 'exhibitor-service',
-                                    'technical-regulation', 'download', 'document',
-                                ])
-                            )
-                            if is_doc_link:
-                                scan_queue.append(link.url)
-                                seen_second_pass.add(link.url)
-                                self._log(f"    🔗 Queued doc page: {link.text[:30] if link.text else link.url[:40]}...")
+                            scan_queue.append(link.url)
+                            seen_second_pass.add(link.url)
+                            self._log(f"    🔗 Queued: {link.text[:30] if link.text else link.url.split('/')[-1][:40]}...")
 
                         if link.url not in results['exhibitor_pages']:
                             results['exhibitor_pages'].append(link.url)
@@ -1413,6 +1399,10 @@ class ClaudeAgent:
 
             portal_urls.sort(key=_relevance_score, reverse=True)
 
+            # Remove portals with zero relevance score — these likely belong to other fairs
+            # (e.g. MWC portals appearing in Provada results due to generic web search)
+            portal_urls = [u for u in portal_urls if _relevance_score(u) > 0]
+
         return portal_urls
 
     async def _deep_scan_portals(self, portal_urls: List[str], fair_name: str) -> List[Dict]:
@@ -1450,8 +1440,8 @@ class ClaudeAgent:
             'floor plan', 'floorplan', 'hall plan', 'map', 'layout', 'venue',
             # Dutch: stand builders, setup/teardown, access policy
             'standbouw', 'standbouwer', 'standhouder', 'toegang',
-            # English: contractor pages
-            'contractor',
+            # English: contractor pages, terms & conditions
+            'contractor', 'terms and condition', 'terms-and-condition',
         ]
 
         scan_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
@@ -1717,11 +1707,12 @@ class ClaudeAgent:
         links: list,
         fair_name: str = '',
     ) -> list:
-        """Use Haiku to classify which unmatched links are relevant for exhibitor research.
+        """PRIMARY link classifier: use Haiku to decide which internal links are
+        relevant for exhibitor documentation research.
 
-        This acts as a safety net after keyword filtering: any link that keywords
-        missed but that an LLM recognises as relevant (in any language) gets included.
-        Sends all links in ONE batch call to keep cost/latency low.
+        This is the main classification mechanism — it works in any language
+        without needing keyword lists. Sends all links in ONE batch call to
+        keep cost/latency low.
 
         Returns a list of URLs that should be followed.
         """
@@ -1731,22 +1722,28 @@ class ClaudeAgent:
         # Build a compact numbered list for the prompt
         link_list_str = "\n".join(
             f"{i+1}. [{l['text']}] -> {l['url']}"
-            for i, l in enumerate(links[:120])
+            for i, l in enumerate(links[:150])
         )
 
         prompt = f"""You are helping discover exhibitor documentation for the trade fair "{fair_name}".
 
 Below is a list of internal website links (link text + URL). For each link, decide whether it
-is likely to lead to a page with useful exhibitor documentation such as:
+is likely to lead to a page containing information that a stand builder (contractor) would need.
+
+Select links that lead to pages about:
 - Exhibitor manuals, handbooks, welcome packs
-- Technical regulations, rules, guidelines, stand build regulations
+- Terms and conditions, general conditions, participation rules
+- Technical regulations, rules, guidelines, stand construction regulations
 - Setup/teardown (build-up/dismantling) schedules or access policies
-- Contractor / stand builder information (EAC, appointed contractors)
-- Floor plans, hall plans, venue maps
+- Contractor / stand builder / EAC information
+- Floor plans, hall plans, venue maps, stand layout
 - Exhibitor services, logistics, sustainability guidelines
 - Important deadlines for exhibitors
+- Document downloads, forms, or resources for exhibitors
 
 This can be in ANY language (English, Dutch, German, French, Italian, Spanish, etc.).
+Be GENEROUS — if a link MIGHT contain useful exhibitor info, include it.
+Do NOT select: news articles, blog posts, visitor info, ticket sales, exhibitor directories/lists, company profiles.
 
 Links:
 {link_list_str}
@@ -1761,7 +1758,7 @@ If none are relevant, reply with: []"""
                 try:
                     response = self.client.messages.create(
                         model="claude-haiku-4-5-20251001",
-                        max_tokens=500,
+                        max_tokens=1024,
                         messages=[{"role": "user", "content": prompt}]
                     )
                     break
@@ -1967,7 +1964,7 @@ If none are relevant, reply with: []"""
 
         return found_pdfs
 
-    async def _web_search_for_portals(self, fair_name: str) -> dict:
+    async def _web_search_for_portals(self, fair_name: str, fair_url: str = "") -> dict:
         """
         Search the web for exhibitor portals and event manuals.
         Uses Brave Search (primary) via plain HTTP — no Playwright needed.
@@ -2039,6 +2036,23 @@ If none are relevant, reply with: []"""
             if word not in stop_words and len(word) >= 3:
                 fair_pdf_keywords.append(word)
 
+        # Fair name words for portal relevance filtering (prevent cross-fair contamination)
+        fair_name_words = set()
+        for word in name_words:
+            if word not in stop_words and len(word) >= 3:
+                fair_name_words.add(word)
+        # Also add concatenated name (e.g. "greentech", "provada")
+        concat_name = clean_name.lower().replace(' ', '').replace('-', '')
+        if len(concat_name) >= 3:
+            fair_name_words.add(concat_name)
+        # Extract base domain of the fair's website (used for portal filtering)
+        fair_base_domain = ''
+        if fair_url:
+            try:
+                fair_base_domain = urlparse(fair_url).netloc.lower().replace('www.', '')
+            except Exception:
+                pass
+
         # URL keyword matching for non-PDF results (portals, important pages)
         url_keywords = [
             'exhibitor', 'oem', 'event-manual', 'eventmanual',
@@ -2061,9 +2075,17 @@ If none are relevant, reply with: []"""
                 if any(se in host for se in ['bing.com', 'google.', 'duckduckgo', 'yahoo.', 'brave.com']):
                     return False
 
-                # Domain whitelist (portals, CDNs)
+                # Domain whitelist (portals, CDNs) — but REQUIRE fair relevance
+                # to prevent cross-fair contamination (e.g. MWC portals showing up for Provada)
                 if any(domain in host for domain in interesting_domains):
-                    return True
+                    # Check if the URL contains any word from the fair name
+                    if any(fw in url_lower for fw in fair_name_words if len(fw) >= 3):
+                        return True
+                    # Also accept if the fair's website domain appears in the URL
+                    if fair_base_domain and fair_base_domain in host:
+                        return True
+                    # Generic portal homepages without fair name — skip
+                    return False
 
                 # URL contains exhibitor/document keywords
                 if any(kw in url_lower for kw in url_keywords):
