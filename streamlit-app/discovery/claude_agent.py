@@ -1057,7 +1057,7 @@ class ClaudeAgent:
                         relevant_links.get('exhibitor_links', []) +
                         relevant_links.get('download_links', []) +
                         relevant_links.get('high_value_links', []) +
-                        relevant_links.get('all_links', [])[:50]  # Sample of all links
+                        relevant_links.get('all_links', [])[:200]  # Broader sample (sites can have 200+ links)
                     )
 
                     # Remove duplicates
