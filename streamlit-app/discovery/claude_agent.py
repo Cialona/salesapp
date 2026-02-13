@@ -2665,47 +2665,88 @@ Reply with ONLY a JSON array of objects, one per page. Example:
         start_time = time.time()
 
         try:
-            # If no known_url, try to find it via Google search using a temporary browser
+            # If no known_url, try to find it via web search (Brave + DuckDuckGo fallback)
             if not input_data.known_url:
-                self._log("⚠️ Geen website URL opgegeven - probeer via Google te vinden...")
-                search_query = f"{input_data.fair_name} {input_data.city or ''} official website exhibitor".strip()
-                search_url = f"https://www.google.com/search?q={quote_plus(search_query)}"
-                search_browser = BrowserController(800, 600, download_dir_suffix=self._download_dir_suffix)
+                self._log("⚠️ Geen website URL opgegeven - probeer via websearch te vinden...")
+                import urllib.parse
+                import urllib.request
+                import urllib.error
+                import ssl
+                import random
+
+                search_query = f"{input_data.fair_name} {input_data.city or ''} official website".strip()
+                skip_domains = {'google.com', 'google.nl', 'gstatic.com', 'googleapis.com',
+                               'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
+                               'linkedin.com', 'instagram.com', 'wikipedia.org', 'reddit.com',
+                               'pinterest.com', 'tiktok.com', 'brave.com', 'search.brave.com',
+                               'duckduckgo.com'}
+                ssl_ctx = ssl.create_default_context()
+                found_url = None
+
+                # --- Brave Search (primary) ---
                 try:
-                    await search_browser.launch()
-                    await search_browser.goto(search_url)
-                    await asyncio.sleep(2)
-                    # Extract first relevant result from Google
-                    page_text = await search_browser.extract_page_text()
-                    if page_text:
-                        import re as _re
-                        # Find URLs that look like fair websites in Google results
-                        url_pattern = _re.compile(r'https?://(?:www\.)?([a-z0-9][-a-z0-9]*\.[a-z.]{2,})')
-                        skip_domains = {'google.com', 'google.nl', 'gstatic.com', 'googleapis.com',
-                                       'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
-                                       'linkedin.com', 'instagram.com', 'wikipedia.org', 'reddit.com',
-                                       'pinterest.com', 'tiktok.com'}
-                        for match in url_pattern.finditer(page_text):
-                            domain = match.group(1).lower()
-                            if not any(skip in domain for skip in skip_domains):
-                                found_url = match.group(0)
-                                self._log(f"   Google resultaat gevonden: {found_url}")
-                                input_data = type(input_data)(
-                                    fair_name=input_data.fair_name,
-                                    known_url=found_url,
-                                    city=input_data.city,
-                                    country=input_data.country,
-                                    client_name=input_data.client_name,
-                                )
-                                output.debug.notes.append(f"URL via Google gevonden: {found_url}")
+                    self._log(f"   🔍 Brave search: '{search_query}'")
+                    encoded_q = urllib.parse.quote_plus(search_query)
+                    req = urllib.request.Request(
+                        f"https://search.brave.com/search?q={encoded_q}",
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                        })
+                    resp = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
+                    html = resp.read().decode('utf-8', errors='ignore')
+                    if html and len(html) > 1000:
+                        snippet_blocks = html.split('class="snippet ')
+                        for block in snippet_blocks[1:]:
+                            hrefs = re.findall(
+                                r'href="(https?://(?!search\.brave|brave\.com|cdn\.search\.brave)[^"]+)"',
+                                block[:3000])
+                            for href in hrefs:
+                                domain = urlparse(href).netloc.lower().lstrip('www.')
+                                if not any(skip in domain for skip in skip_domains):
+                                    found_url = href.split('#')[0].rstrip('/')
+                                    break
+                            if found_url:
                                 break
                 except Exception as e:
-                    self._log(f"   Google search mislukt: {e}")
-                finally:
+                    self._log(f"   Brave search fout: {e}")
+
+                # --- DuckDuckGo fallback ---
+                if not found_url:
                     try:
-                        await search_browser.close()
-                    except Exception:
-                        pass
+                        self._log(f"   🔄 DuckDuckGo fallback: '{search_query}'")
+                        encoded_q = urllib.parse.quote_plus(search_query)
+                        req = urllib.request.Request(
+                            f"https://html.duckduckgo.com/html/?q={encoded_q}",
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                                'Accept': 'text/html',
+                            })
+                        resp = urllib.request.urlopen(req, timeout=15, context=ssl_ctx)
+                        html = resp.read().decode('utf-8', errors='ignore')
+                        if html and 'captcha' not in html.lower():
+                            raw_hrefs = re.findall(r'uddg=([^&"]+)', html)
+                            for href in raw_hrefs:
+                                decoded = urllib.parse.unquote(urllib.parse.unquote(href))
+                                if decoded.startswith('http'):
+                                    domain = urlparse(decoded).netloc.lower().lstrip('www.')
+                                    if not any(skip in domain for skip in skip_domains):
+                                        found_url = decoded.split('#')[0].rstrip('/')
+                                        break
+                    except Exception as e:
+                        self._log(f"   DuckDuckGo search fout: {e}")
+
+                if found_url:
+                    self._log(f"   ✅ Website gevonden: {found_url}")
+                    input_data = type(input_data)(
+                        fair_name=input_data.fair_name,
+                        known_url=found_url,
+                        city=input_data.city,
+                        country=input_data.country,
+                        client_name=input_data.client_name,
+                    )
+                    output.debug.notes.append(f"URL via websearch gevonden: {found_url}")
 
             if not input_data.known_url:
                 self._log("❌ Geen website URL gevonden voor deze beurs.")
