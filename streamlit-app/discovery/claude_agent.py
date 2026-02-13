@@ -2676,7 +2676,7 @@ Reply with ONLY a JSON array of objects, one per page. Example:
                     await search_browser.goto(search_url)
                     await asyncio.sleep(2)
                     # Extract first relevant result from Google
-                    page_text = await search_browser.get_page_text()
+                    page_text = await search_browser.extract_page_text()
                     if page_text:
                         import re as _re
                         # Find URLs that look like fair websites in Google results
