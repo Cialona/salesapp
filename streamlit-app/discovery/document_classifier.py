@@ -34,6 +34,11 @@ from discovery.document_types import (
     get_type_search_hints,
     get_llm_classification_prompt,
 )
+from discovery.fair_name_utils import (
+    fair_name_in_url,
+    any_fair_keyword_in_url,
+    is_different_fair_pdf,
+)
 
 # Try to import PDF library
 try:
@@ -361,8 +366,11 @@ class DocumentClassifier:
                     score += 8  # Strong bonus for same domain
                 elif fair_base_domain:
                     # Check if ANY fair name keyword appears in the hostname
-                    # e.g., "mwcbarcelona" in URL when fair is "MWC 2026"
-                    host_has_fair_keyword = any(kw in page_host for kw in fair_keywords if len(kw) >= 4)
+                    # Uses word-boundary matching for short names to prevent
+                    # false positives (e.g., "ire" matching "icegaming.com")
+                    host_has_fair_keyword = any_fair_keyword_in_url(
+                        set(fair_keywords), page_host, min_length=3
+                    )
                     if not host_has_fair_keyword:
                         # Different domain without fair name → likely cross-fair contamination
                         score -= 6
@@ -1316,6 +1324,13 @@ Regels:
             classification.content_verified = True
             classification.text_excerpt = text_content[:1000]
 
+            # Early reject: PDF belongs to a different fair (e.g., "LTW26" when searching for "IRE 2026")
+            if is_different_fair_pdf(url, fair_name):
+                classification.reason = f"PDF URL contains a different fair's identifier"
+                classification.confidence = 'none'
+                self.log(f"    ✗ Skipping cross-fair PDF: {url[:60]}... (different fair code in filename)")
+                return classification
+
             # Early reject: wrong edition based on URL or content
             if edition_exclusions:
                 url_lower = url.lower()
@@ -1332,7 +1347,11 @@ Regels:
             classification.year_verified = any(yp in text_content for yp in year_patterns)
 
             # Check for fair/venue name in content
-            classification.fair_verified = any(kw in text_lower for kw in fair_keywords)
+            # Use word-boundary matching for short keywords to prevent false positives
+            from .fair_name_utils import fair_name_in_text
+            classification.fair_verified = any(
+                fair_name_in_text(kw, text_content) for kw in fair_keywords
+            )
 
             # Use LLM for detailed validation and content extraction
             validation_result = await self._llm_validate_and_extract(

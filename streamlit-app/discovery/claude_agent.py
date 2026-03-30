@@ -33,6 +33,12 @@ from .document_types import (
     get_pdf_keywords,
     get_pdf_exclusions,
 )
+from .fair_name_utils import (
+    fair_name_in_url,
+    any_fair_keyword_in_url,
+    extract_fair_keywords as _extract_fair_kws,
+    is_different_fair_pdf,
+)
 
 
 class _DiscoveryCancelled(Exception):
@@ -1561,15 +1567,16 @@ class ClaudeAgent:
                     match_terms.add(w)
 
             def _relevance_score(url: str) -> int:
-                """Higher = more relevant to fair. Sort descending."""
-                lower_url = url.lower()
+                """Higher = more relevant to fair. Sort descending.
+                Uses word-boundary matching for short terms to prevent
+                false positives (e.g., 'ire' in 'ge26ire')."""
                 host = urlparse(url).netloc.lower()
                 path = urlparse(url).path.lower()
                 score = 0
                 for term in match_terms:
-                    if term in host:
+                    if fair_name_in_url(term, host):
                         score += 10  # Strong: fair name in hostname
-                    if term in path:
+                    if fair_name_in_url(term, path):
                         score += 5   # Good: fair name in path
                 # OEM portals (e.g., mwcoem, provadaoem) typically contain the richest
                 # content: rules, schedules, manuals. Prioritize them.
@@ -2262,9 +2269,12 @@ Reply with ONLY a JSON array of objects, one per page. Example:
 
                 # Domain whitelist (portals, CDNs) — but REQUIRE fair relevance
                 # to prevent cross-fair contamination (e.g. MWC portals showing up for Provada)
+                # Uses word-boundary matching for short fair names (< 5 chars) to prevent
+                # false positives like "ire" matching "ge26ire" or "require"
                 if any(domain in host for domain in interesting_domains):
                     # Check if the URL contains any word from the fair name
-                    if any(fw in url_lower for fw in fair_name_words if len(fw) >= 3):
+                    # (uses word-boundary matching for short names)
+                    if any_fair_keyword_in_url(fair_name_words, decoded_url, min_length=3):
                         return True
                     # Also accept if the fair's website domain appears in the URL
                     if fair_base_domain and fair_base_domain in host:
@@ -3927,6 +3937,48 @@ Antwoord ALLEEN met valide JSON."""
         if pdfs_scanned > 0:
             self._log(f"📄 Post-scan: {pdfs_scanned} browser-downloaded PDFs gescand voor schedule data")
 
+    def _is_url_relevant_to_fair(self, url: str, output: DiscoveryOutput) -> bool:
+        """Check if a URL is relevant to the current fair.
+
+        Validates that URLs returned by the browser agent aren't from unrelated fairs.
+        Uses the official domain and fair name keywords for matching.
+        """
+        if not url:
+            return False
+
+        try:
+            parsed = urlparse(url)
+            host = parsed.netloc.lower()
+        except Exception:
+            return False
+
+        # Always accept URLs from the official domain
+        official_domain = (output.official_domain or '').lower()
+        if official_domain:
+            official_base = official_domain.replace('www.', '')
+            if official_base in host:
+                return True
+
+        # Accept known CDN/document hosting domains
+        cdn_domains = [
+            'cloudfront.net', 's3.amazonaws.com', 'blob.core.windows.net',
+            'azureedge.net', 'akamaized.net', 'googleapis.com', 'asp.events',
+        ]
+        if any(cdn in host for cdn in cdn_domains):
+            return True
+
+        # For third-party platforms, require fair name match using word-boundary matching
+        fair_keywords = set(_extract_fair_kws(output.fair_name))
+        if any_fair_keyword_in_url(fair_keywords, url, min_length=3):
+            return True
+
+        # Also check if URL contains a different fair's code (cross-fair contamination)
+        if is_different_fair_pdf(url, output.fair_name):
+            return False
+
+        # Unknown domain without fair name — reject
+        return False
+
     def _parse_result(self, text: str, output: DiscoveryOutput) -> None:
         """Parse the final JSON result from Claude."""
         # Try to extract JSON from the text
@@ -3950,36 +4002,54 @@ Antwoord ALLEEN met valide JSON."""
                 rejected_keywords = ['afgewezen', 'niet gevonden', 'rejected', 'not found', 'voldoet niet', 'does not meet']
                 return not any(kw in validation_lower for kw in rejected_keywords)
 
+            # Helper to validate URL is relevant to the fair (prevents cross-fair contamination)
+            def is_relevant_url(url_value: str) -> bool:
+                if not url_value:
+                    return False
+                return self._is_url_relevant_to_fair(url_value, output)
+
             # Map to output structure with validation checks
             floorplan_validation = result.get("floorplan_validation", "")
-            if result.get("floorplan_url") and is_validated(floorplan_validation):
-                output.documents.floorplan_url = result["floorplan_url"]
+            floorplan_url = result.get("floorplan_url")
+            if floorplan_url and is_validated(floorplan_validation) and is_relevant_url(floorplan_url):
+                output.documents.floorplan_url = floorplan_url
                 output.quality.floorplan = "strong"
                 output.primary_reasoning.floorplan = floorplan_validation or "Found by Claude agent"
+            elif floorplan_url and not is_relevant_url(floorplan_url):
+                output.debug.notes.append(f"⚠️ Floorplan URL rejected (cross-fair): {floorplan_url}")
             elif floorplan_validation:
                 output.primary_reasoning.floorplan = floorplan_validation
 
             exhibitor_manual_validation = result.get("exhibitor_manual_validation", "")
-            if result.get("exhibitor_manual_url") and is_validated(exhibitor_manual_validation):
-                output.documents.exhibitor_manual_url = result["exhibitor_manual_url"]
+            manual_url = result.get("exhibitor_manual_url")
+            if manual_url and is_validated(exhibitor_manual_validation) and is_relevant_url(manual_url):
+                output.documents.exhibitor_manual_url = manual_url
                 output.quality.exhibitor_manual = "strong"
                 output.primary_reasoning.exhibitor_manual = exhibitor_manual_validation or "Found by Claude agent"
+            elif manual_url and not is_relevant_url(manual_url):
+                output.debug.notes.append(f"⚠️ Manual URL rejected (cross-fair): {manual_url}")
             elif exhibitor_manual_validation:
                 output.primary_reasoning.exhibitor_manual = exhibitor_manual_validation
 
             rules_validation = result.get("rules_validation", "")
-            if result.get("rules_url") and is_validated(rules_validation):
-                output.documents.rules_url = result["rules_url"]
+            rules_url = result.get("rules_url")
+            if rules_url and is_validated(rules_validation) and is_relevant_url(rules_url):
+                output.documents.rules_url = rules_url
                 output.quality.rules = "strong"
                 output.primary_reasoning.rules = rules_validation or "Found by Claude agent"
+            elif rules_url and not is_relevant_url(rules_url):
+                output.debug.notes.append(f"⚠️ Rules URL rejected (cross-fair): {rules_url}")
             elif rules_validation:
                 output.primary_reasoning.rules = rules_validation
 
             exhibitor_directory_validation = result.get("exhibitor_directory_validation", "")
-            if result.get("exhibitor_directory_url") and is_validated(exhibitor_directory_validation):
-                output.documents.exhibitor_directory_url = result["exhibitor_directory_url"]
+            directory_url = result.get("exhibitor_directory_url")
+            if directory_url and is_validated(exhibitor_directory_validation) and is_relevant_url(directory_url):
+                output.documents.exhibitor_directory_url = directory_url
                 output.quality.exhibitor_directory = "strong"
                 output.primary_reasoning.exhibitor_directory = exhibitor_directory_validation or "Found by Claude agent"
+            elif directory_url and not is_relevant_url(directory_url):
+                output.debug.notes.append(f"⚠️ Directory URL rejected (cross-fair): {directory_url}")
             elif exhibitor_directory_validation:
                 output.primary_reasoning.exhibitor_directory = exhibitor_directory_validation
 
